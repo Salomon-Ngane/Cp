@@ -1,9 +1,7 @@
 import os
-import asyncio
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
-import uvicorn
+from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import config
@@ -11,10 +9,8 @@ import database
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Initialisation de l'application Telegram Bot
 telegram_app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-# Handler /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
@@ -37,7 +33,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
-# Handler /addcoins (Admin)
 async def admin_add_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != config.ADMIN_TELEGRAM_ID:
         return
@@ -51,25 +46,33 @@ async def admin_add_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("❌ Usage: /addcoins <telegram_id> <montant>")
 
-# Enregistrement des commandes
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("addcoins", admin_add_coins))
 
-# Démarrage sécurisé sans doublon
+# URL publique fournie par Render (ex: https://mon-bot.onrender.com)
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await telegram_app.initialize()
     await telegram_app.start()
-    # On lance le polling en tâche de fond pour ne pas bloquer FastAPI
-    polling_task = asyncio.create_task(telegram_app.updater.start_polling(drop_pending_updates=True))
-    logging.info("🤖 Bot Telegram démarré avec succès !")
+    
+    if RENDER_EXTERNAL_URL:
+        webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+        await telegram_app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+        logging.info(f"🔗 Webhook configuré sur : {webhook_url}")
     yield
-    # Arrêt propre
-    await telegram_app.updater.stop()
     await telegram_app.stop()
     await telegram_app.shutdown()
 
 app = FastAPI(lifespan=lifespan)
+
+@app.post("/webhook")
+async def process_webhook(request: Request):
+    req_data = await request.json()
+    update = Update.de_json(req_data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"status": "ok"}
 
 @app.get("/")
 def health_check():
@@ -77,5 +80,5 @@ def health_check():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    # Desactivation du reload pour éviter la double execution
-    uvicorn.run("bot:app", host="0.0.0.0", port=port, reload=False)
+    import uvicorn
+    uvicorn.run("bot:app", host="0.0.0.0", port=port)
