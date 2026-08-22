@@ -82,3 +82,12 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     import uvicorn
     uvicorn.run("bot:app", host="0.0.0.0", port=port)
+    async def seed_matches_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != config.ADMIN_TELEGRAM_ID:
+        return
+    matches = database.create_sample_matches()
+    await update.message.reply_text(f"✅ {len(matches)} matchs de test créés et disponibles dans Supabase !")
+
+# Dans l'enregistrement des handlers :
+telegram_app.add_handler(CommandHandler("seedmatches", seed_matches_command))
+
