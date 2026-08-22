@@ -55,21 +55,20 @@ async def admin_add_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("addcoins", admin_add_coins))
 
-# Démarrage / Arrêt du Bot avec le cycle de vie de FastAPI
+# Démarrage sécurisé sans doublon
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Démarrage du bot en mode polling au lancement du Web Service
     await telegram_app.initialize()
     await telegram_app.start()
-    await telegram_app.updater.start_polling()
+    # On lance le polling en tâche de fond pour ne pas bloquer FastAPI
+    polling_task = asyncio.create_task(telegram_app.updater.start_polling(drop_pending_updates=True))
     logging.info("🤖 Bot Telegram démarré avec succès !")
     yield
-    # Arrêt du bot lors de la fermeture du Web Service
+    # Arrêt propre
     await telegram_app.updater.stop()
     await telegram_app.stop()
     await telegram_app.shutdown()
 
-# Création du serveur FastAPI
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
@@ -78,4 +77,5 @@ def health_check():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("bot:app", host="0.0.0.0", port=port)
+    # Desactivation du reload pour éviter la double execution
+    uvicorn.run("bot:app", host="0.0.0.0", port=port, reload=False)
