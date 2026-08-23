@@ -1,229 +1,243 @@
-import os
-import logging
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from supabase import create_client, Client
 import config
-import database
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 
-telegram_app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
-USER_TICKETS = {}
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.error("❌ Exception levée :", exc_info=context.error)
+# --- UTILISATEURS ---
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    args = context.args
-    
-    referred_by = None
-    duel_to_join = None
-    
-    if args:
-        if args[0].startswith("duel_"):
-            duel_to_join = args[0].replace("duel_", "")
-        elif args[0].isdigit():
-            referred_by = int(args[0])
-            
-    db_user = database.get_or_create_user(user.id, user.username or user.first_name, referred_by)
-    
-    if duel_to_join:
-        session = database.get_duel_session(duel_to_join)
-        if session and session["status"] == "WAITING":
-            if session["creator_id"] == user.id:
-                await update.message.reply_text("ℹ️ Vous êtes le créateur de ce duel en attente.")
-            else:
-                return await prompt_join_duel(update.message.reply_text, user.id, session)
-        else:
-            await update.message.reply_text("❌ Ce duel n'existe plus ou est déjà en cours.")
+def get_or_create_user(telegram_id: int, username: str, referred_by: int = None):
+    """Récupère l'utilisateur ou le crée avec un solde initial de 0."""
+    res = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
+    if res.data:
+        return res.data[0]
 
-    await send_main_menu(update.message.reply_text, db_user)
+    new_user = {
+        "telegram_id": telegram_id,
+        "username": username,
+        "coins_balance": 0,
+        "referred_by": referred_by,
+    }
+    insert_res = supabase.table("users").insert(new_user).execute()
+    return insert_res.data[0]
 
-async def send_main_menu(reply_method, db_user):
-    text = (
-        f"👋 Bienvenue **{db_user['username']}** dans le Bot Duel Sports !\n\n"
-        f"💰 **Votre Solde :** `{db_user['coins_balance']}` Coins\n\n"
-        "Choisissez un mode de jeu :"
+
+def credit_balance(telegram_id: int, amount: float):
+    """Ajoute `amount` au solde d'un utilisateur (recharge admin ou paiement de gain)."""
+    user = get_or_create_user(telegram_id, "")
+    new_balance = user["coins_balance"] + amount
+    supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", telegram_id).execute()
+    return new_balance
+
+
+# --- MATCHS ---
+
+def create_sample_matches():
+    """Génère 5 matchs de test pour essayer le système de pronostics."""
+    sample_matches = [
+        {"api_match_id": 101, "home_team": "Real Madrid", "away_team": "Barcelona", "status": "NS"},
+        {"api_match_id": 102, "home_team": "PSG", "away_team": "Marseille", "status": "NS"},
+        {"api_match_id": 103, "home_team": "Arsenal", "away_team": "Chelsea", "status": "NS"},
+        {"api_match_id": 104, "home_team": "Bayern Munich", "away_team": "Dortmund", "status": "NS"},
+        {"api_match_id": 105, "home_team": "Inter Milan", "away_team": "AC Milan", "status": "NS"},
+    ]
+    for match in sample_matches:
+        supabase.table("matches").upsert(match, on_conflict="api_match_id").execute()
+    return get_active_matches()
+
+
+def get_active_matches():
+    """Récupère tous les matchs à venir/non démarrés."""
+    response = supabase.table("matches").select("*").eq("status", "NS").execute()
+    return response.data
+
+
+def get_matches_by_ids(match_ids: list):
+    """Récupère des matchs précis (sert à figer la grille d'un duel), dans l'ordre demandé."""
+    if not match_ids:
+        return []
+    response = supabase.table("matches").select("*").in_("api_match_id", match_ids).execute()
+    by_id = {m["api_match_id"]: m for m in response.data}
+    return [by_id[mid] for mid in match_ids if mid in by_id]
+
+
+def set_match_result(api_match_id: int, result: str):
+    """Enregistre le résultat d'un match (HOME / DRAW / AWAY) et le marque comme terminé."""
+    supabase.table("matches").update({
+        "status": "FINISHED",
+        "result": result,
+    }).eq("api_match_id", api_match_id).execute()
+
+
+# --- DUELS (SESSIONS) ---
+
+def create_duel_session(creator_id: int, gross_fee: float, match_ids: list):
+    """Crée une session de duel 1v1 : prélève la mise brute et fige la liste des matchs jouée."""
+    user = get_or_create_user(creator_id, "")
+    if user["coins_balance"] < gross_fee:
+        return None, "Solde insuffisant"
+
+    rake = gross_fee * config.RAKE_PERCENTAGE
+    net_fee = gross_fee - rake
+
+    new_balance = user["coins_balance"] - gross_fee
+    supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", creator_id).execute()
+
+    session_data = {
+        "creator_id": creator_id,
+        "type": "DUEL",
+        "gross_entry_fee": gross_fee,
+        "net_entry_fee": net_fee,
+        "max_players": 2,
+        "status": "WAITING",
+        "match_ids": match_ids,
+    }
+    session = supabase.table("sessions").insert(session_data).execute()
+    return session.data[0], "Succès"
+
+
+def get_session(session_id: str):
+    """Récupère une session par son id."""
+    res = supabase.table("sessions").select("*").eq("id", session_id).execute()
+    return res.data[0] if res.data else None
+
+
+def get_open_duels(exclude_creator_id: int = None):
+    """Récupère les duels en attente d'adversaire (optionnellement en excluant ses propres duels)."""
+    query = supabase.table("sessions").select("*").eq("status", "WAITING").eq("type", "DUEL")
+    if exclude_creator_id is not None:
+        query = query.neq("creator_id", exclude_creator_id)
+    res = query.execute()
+    return res.data
+
+
+def join_duel_session(session_id: str, joiner_id: int, predictions: list):
+    """
+    Un second joueur rejoint un duel WAITING : prélève sa mise (identique à celle du créateur),
+    verrouille la session et enregistre son ticket.
+    """
+    session = get_session(session_id)
+    if not session:
+        return None, "Ce duel n'existe plus."
+    if session["status"] != "WAITING":
+        return None, "Ce duel n'est plus disponible (déjà rejoint ou annulé)."
+    if session["creator_id"] == joiner_id:
+        return None, "Vous ne pouvez pas rejoindre votre propre duel."
+
+    gross_fee = session["gross_entry_fee"]
+    joiner = get_or_create_user(joiner_id, "")
+    if joiner["coins_balance"] < gross_fee:
+        return None, f"Solde insuffisant (il vous faut {gross_fee} Coins)."
+
+    new_balance = joiner["coins_balance"] - gross_fee
+    supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", joiner_id).execute()
+
+    # Le .eq("status", "WAITING") protège contre une double-jointure concurrente :
+    # si un autre joueur a rejoint entre notre lecture et notre écriture, 0 ligne est mise à jour.
+    updated = (
+        supabase.table("sessions")
+        .update({"opponent_id": joiner_id, "status": "IN_PROGRESS"})
+        .eq("id", session_id)
+        .eq("status", "WAITING")
+        .execute()
     )
-    keyboard = [
-        [InlineKeyboardButton("⚔️ Créer / Rejoindre un Duel", callback_data="menu_duel")],
-        [InlineKeyboardButton("🏟️ Mode Arena (Top 3)", callback_data="wip_arena")],
-        [InlineKeyboardButton("🏆 Ligue Quotidienne", callback_data="wip_ligue")],
-        [InlineKeyboardButton("💳 Mon Compte / Badges", callback_data="wip_account")]
-    ]
-    await reply_method(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-async def prompt_join_duel(reply_method, user_id, session):
-    text = (
-        f"⚔️ **Défi Reçu !**\n\n"
-        f"Mise requise : `{session['gross_entry_fee']}` Coins\n"
-        f"Cagnotte : `{session['net_entry_fee'] * 2}` Coins à gagner.\n\n"
-        "Voulez-vous affronter ce joueur ?"
+    if not updated.data:
+        # Remboursement : quelqu'un d'autre a rejoint entre-temps
+        supabase.table("users").update({"coins_balance": joiner["coins_balance"]}).eq("telegram_id", joiner_id).execute()
+        return None, "Un autre joueur vient de rejoindre ce duel juste avant vous."
+
+    save_ticket(session_id, joiner_id, predictions)
+    return updated.data[0], "Succès"
+
+
+# --- TICKETS ---
+
+def save_ticket(session_id: str, user_id: int, predictions: list):
+    """Enregistre le ticket de pronostics d'un joueur pour une session donnée."""
+    ticket_data = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "predictions": predictions,
+        "status": "PENDING",
+    }
+    res = supabase.table("tickets").insert(ticket_data).execute()
+    return res.data[0]
+
+
+# --- RÉSOLUTION & PAIEMENT ---
+
+def find_resolvable_sessions(api_match_id: int):
+    """
+    Sessions IN_PROGRESS contenant ce match, et dont tous les matchs de la grille
+    ont désormais un résultat enregistré.
+    NB : repose sur l'opérateur de containment jsonb de PostgREST (.contains) —
+    à vérifier une fois en conditions réelles selon la version de supabase-py utilisée.
+    """
+    res = (
+        supabase.table("sessions")
+        .select("*")
+        .eq("status", "IN_PROGRESS")
+        .eq("type", "DUEL")
+        .contains("match_ids", [api_match_id])
+        .execute()
     )
-    keyboard = [
-        [InlineKeyboardButton("✅ Accepter et Pronostiquer", callback_data=f"startjoin_{session['id']}")],
-        [InlineKeyboardButton("❌ Refuser", callback_data="menu_main")]
-    ]
-    await reply_method(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    resolvable = []
+    for session in res.data:
+        matches = get_matches_by_ids(session["match_ids"])
+        if matches and all(m.get("result") for m in matches):
+            resolvable.append(session)
+    return resolvable
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    data = query.data
 
-    if data.startswith("wip_"):
-        await query.answer("🚧 Fonctionnalité en cours de développement !", show_alert=True)
-        return
-        
-    await query.answer()
+def resolve_duel(session_id: str):
+    """Compare les deux tickets d'un duel, désigne un gagnant (ou partage en cas d'égalité) et paie."""
+    session = get_session(session_id)
+    if not session or session["status"] != "IN_PROGRESS":
+        return None
 
-    if data == "menu_main":
-        db_user = database.get_or_create_user(user_id, "")
-        await send_main_menu(query.edit_message_text, db_user)
+    tickets_res = supabase.table("tickets").select("*").eq("session_id", session_id).execute()
+    tickets = tickets_res.data
+    if len(tickets) != 2:
+        return None  # sécurité : un duel doit avoir exactement 2 tickets pour être résolu
 
-    elif data == "menu_duel":
-        text = "⚔️ **MODE DUEL 1v1**"
-        keyboard = [
-            [InlineKeyboardButton("➕ Créer un nouveau Duel", callback_data="duel_create_stake")],
-            [InlineKeyboardButton("🔍 Liste des Duels Ouverts", callback_data="duel_list_public")],
-            [InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_main")]
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    matches = get_matches_by_ids(session["match_ids"])
+    results_by_match = {m["api_match_id"]: m.get("result") for m in matches}
 
-    elif data == "duel_list_public":
-        duels = database.get_open_duels()
-        if not duels:
-            await query.edit_message_text("❌ Aucun duel ouvert actuellement.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")]]))
-            return
-            
-        keyboard = []
-        for d in duels:
-            # Sécurité pour ne pas s'affronter soi-même
-            if d['creator_id'] != user_id:
-                keyboard.append([InlineKeyboardButton(f"⚔️ Duel - Mise: {d['gross_entry_fee']} Coins", callback_data=f"startjoin_{d['id']}")])
-        
-        keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")])
-        await query.edit_message_text("🔍 **Marché des Duels :**\nChoisissez un adversaire :", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    scores = {}
+    for ticket in tickets:
+        correct = sum(
+            1 for p in ticket["predictions"]
+            if results_by_match.get(p["match_id"]) == p["pick"]
+        )
+        scores[ticket["user_id"]] = correct
 
-    elif data == "duel_create_stake":
-        text = "💰 **Sélectionnez la mise brute pour ce Duel :**"
-        keyboard = [
-            [InlineKeyboardButton("100 Coins", callback_data="stake_100"), InlineKeyboardButton("500 Coins", callback_data="stake_500")],
-            [InlineKeyboardButton("🔙 Annuler", callback_data="menu_duel")]
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    creator_id = session["creator_id"]
+    opponent_id = session["opponent_id"]
+    creator_score = scores.get(creator_id, 0)
+    opponent_score = scores.get(opponent_id, 0)
+    pot = session["net_entry_fee"] * 2
 
-    elif data.startswith("stake_") or data.startswith("startjoin_"):
-        is_joining = data.startswith("startjoin_")
-        session_id_to_join = data.split("_")[1] if is_joining else None
-        stake = 0
-        
-        db_user = database.get_or_create_user(user_id, "")
-        
-        if is_joining:
-            session = database.get_duel_session(session_id_to_join)
-            if not session or session["status"] != "WAITING":
-                await query.edit_message_text("❌ Duel expiré.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")]]))
-                return
-            stake = float(session["gross_entry_fee"])
-        else:
-            stake = float(data.split("_")[1])
-
-        if db_user["coins_balance"] < stake:
-            await query.edit_message_text(f"❌ **Solde Insuffisant !** ({db_user['coins_balance']} Coins)", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")]]))
-            return
-
-        matches = database.get_active_matches()
-        if not matches:
-            await query.edit_message_text("❌ Aucun match actif.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")]]))
-            return
-
-        USER_TICKETS[user_id] = {
-            "stake": stake, 
-            "predictions": [], 
-            "current_match_index": 0, 
-            "matches": matches,
-            "join_session_id": session_id_to_join
-        }
-        await show_match_selection(query, user_id)
-
-    elif data.startswith("pick_"):
-        pick = data.split("_")[1]
-        ticket = USER_TICKETS.get(user_id)
-        if not ticket:
-            await query.edit_message_text("❌ Session expirée.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu_main")]]))
-            return
-
-        idx = ticket["current_match_index"]
-        ticket["predictions"].append({"match_id": ticket["matches"][idx]["api_match_id"], "pick": pick})
-        ticket["current_match_index"] += 1
-
-        if ticket["current_match_index"] >= len(ticket["matches"]):
-            await finalize_ticket_creation(query, user_id)
-        else:
-            await show_match_selection(query, user_id)
-
-async def show_match_selection(query, user_id):
-    ticket = USER_TICKETS[user_id]
-    idx = ticket["current_match_index"]
-    match = ticket["matches"][idx]
-
-    text = f"📝 **Pronostic** ({idx + 1}/{len(ticket['matches'])})\n\n⚽ **{match['home_team']}** VS **{match['away_team']}**"
-    keyboard = [
-        [
-            InlineKeyboardButton(f"1 ({match['home_team']})", callback_data="pick_HOME"),
-            InlineKeyboardButton("N", callback_data="pick_DRAW"),
-            InlineKeyboardButton(f"2 ({match['away_team']})", callback_data="pick_AWAY")
-        ]
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-async def finalize_ticket_creation(query, user_id):
-    ticket = USER_TICKETS.get(user_id)
-    join_session_id = ticket["join_session_id"]
-    
-    if join_session_id:
-        success, msg = database.join_duel_session(join_session_id, user_id)
-        if not success:
-            await query.edit_message_text(f"❌ Erreur : {msg}")
-            return
-        database.save_ticket(join_session_id, user_id, ticket["predictions"])
-        text = "✅ **Duel rejoint avec succès !**\nVos pronostics sont enregistrés. Que le meilleur gagne !"
+    if creator_score > opponent_score:
+        winner_id = creator_id
+        credit_balance(creator_id, pot)
+    elif opponent_score > creator_score:
+        winner_id = opponent_id
+        credit_balance(opponent_id, pot)
     else:
-        session, msg = database.create_duel_session(user_id, ticket["stake"])
-        if not session:
-            await query.edit_message_text(f"❌ Erreur : {msg}")
-            return
-        database.save_ticket(session["id"], user_id, ticket["predictions"])
-        bot_username = (await telegram_app.bot.get_me()).username
-        link = f"https://t.me/{bot_username}?start=duel_{session['id']}"
-        text = f"✅ **Duel créé !**\n💰 Mise : `{ticket['stake']}`\n🔗 Partagez ce lien à votre adversaire :\n{link}"
+        winner_id = None  # égalité : partage
+        credit_balance(creator_id, pot / 2)
+        credit_balance(opponent_id, pot / 2)
 
-    del USER_TICKETS[user_id]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu Principal", callback_data="menu_main")]]), parse_mode="Markdown")
+    supabase.table("sessions").update({"status": "COMPLETED", "winner_id": winner_id}).eq("id", session_id).execute()
+    supabase.table("tickets").update({"status": "RESOLVED"}).eq("session_id", session_id).execute()
 
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CallbackQueryHandler(button_handler))
-telegram_app.add_error_handler(error_handler)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    await telegram_app.initialize()
-    await telegram_app.start()
-    webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/webhook"
-    await telegram_app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
-    yield
-    await telegram_app.stop()
-    await telegram_app.shutdown()
-
-app = FastAPI(lifespan=lifespan)
-
-@app.post("/webhook")
-async def process_webhook(request: Request):
-    req_data = await request.json()
-    update = Update.de_json(req_data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return {"status": "ok"}
+    return {
+        "session_id": session_id,
+        "creator_id": creator_id,
+        "opponent_id": opponent_id,
+        "creator_score": creator_score,
+        "opponent_score": opponent_score,
+        "winner_id": winner_id,
+        "pot": pot,
+    }
