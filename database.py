@@ -1,48 +1,29 @@
+import os
+import uuid
 from supabase import create_client, Client
 import config
+
+if not config.SUPABASE_URL or not config.SUPABASE_KEY:
+    raise ValueError("❌ SUPABASE_URL ou SUPABASE_KEY manquante dans les variables d'environnement !")
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 
 def get_or_create_user(telegram_id: int, username: str, referred_by: int = None):
-    """Récupère l'utilisateur ou le crée avec un solde initial de 0."""
     res = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
     if res.data:
         return res.data[0]
     
+    # On donne 1000 Coins de départ pour faciliter les tests
     new_user = {
         "telegram_id": telegram_id,
         "username": username,
-        "coins_balance": 0,
+        "coins_balance": 1000, 
         "referred_by": referred_by
     }
     insert_res = supabase.table("users").insert(new_user).execute()
     return insert_res.data[0]
 
-def create_duel_session(creator_id: int, gross_fee: float):
-    """Crée une session de duel 1v1 en prélevant la mise brute et en calculant les frais."""
-    user = get_or_create_user(creator_id, "")
-    if user["coins_balance"] < gross_fee:
-        return None, "Solde insuffisant"
-    
-    rake = gross_fee * config.RAKE_PERCENTAGE
-    net_fee = gross_fee - rake
-    
-    # Débit du solde du créateur
-    new_balance = user["coins_balance"] - gross_fee
-    supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", creator_id).execute()
-    
-    # Création de la session
-    session_data = {
-        "creator_id": creator_id,
-        "type": "DUEL",
-        "gross_entry_fee": gross_fee,
-        "net_entry_fee": net_fee,
-        "max_players": 2,
-        "status": "WAITING"
-    }
-    session = supabase.table("sessions").insert(session_data).execute()
-    return session.data[0], "Succès"
-    def create_sample_matches():
+def create_sample_matches():
     """Génère 5 matchs de test pour essayer le système de pronostics."""
     sample_matches = [
         {"api_match_id": 101, "home_team": "Real Madrid", "away_team": "Barcelona", "status": "NS"},
@@ -55,27 +36,23 @@ def create_duel_session(creator_id: int, gross_fee: float):
         supabase.table("matches").upsert(match, on_conflict="api_match_id").execute()
     return get_active_matches()
 
-
 def get_active_matches():
-    """Récupère tous les matchs à venir/non démarrés."""
     response = supabase.table("matches").select("*").eq("status", "NS").execute()
     return response.data
-    import uuid
 
 def create_duel_session(creator_id: int, gross_fee: float):
-    """Crée une session de duel 1v1 et déduit la mise brute du créateur."""
     user = get_or_create_user(creator_id, "")
     if user["coins_balance"] < gross_fee:
         return None, "Solde insuffisant"
     
-    rake = gross_fee * config.RAKE_PERCENTAGE
+    # Sécurité au cas où RAKE_PERCENTAGE n'est pas dans config
+    rake_pct = getattr(config, 'RAKE_PERCENTAGE', 0.10)
+    rake = gross_fee * rake_pct
     net_fee = gross_fee - rake
     
-    # Débit de la mise
-    new_balance = user["coins_balance"] - gross_fee
+    new_balance = float(user["coins_balance"]) - float(gross_fee)
     supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", creator_id).execute()
     
-    # Insertion de la session
     session_data = {
         "creator_id": creator_id,
         "type": "DUEL",
@@ -87,8 +64,28 @@ def create_duel_session(creator_id: int, gross_fee: float):
     session = supabase.table("sessions").insert(session_data).execute()
     return session.data[0], "Succès"
 
+def get_duel_session(session_id: str):
+    res = supabase.table("sessions").select("*").eq("id", session_id).execute()
+    return res.data[0] if res.data else None
+
+def join_duel_session(session_id: str, user_id: int):
+    """Déduit la mise du joueur 2 et passe la session en ACTIVE."""
+    session = get_duel_session(session_id)
+    if not session or session["status"] != "WAITING":
+        return False, "Session invalide ou déjà commencée."
+    
+    gross_fee = float(session["gross_entry_fee"])
+    user = get_or_create_user(user_id, "")
+    
+    if user["coins_balance"] < gross_fee:
+        return False, "Solde insuffisant."
+        
+    new_balance = float(user["coins_balance"]) - gross_fee
+    supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", user_id).execute()
+    supabase.table("sessions").update({"status": "ACTIVE"}).eq("id", session_id).execute()
+    return True, "Succès"
+
 def save_ticket(session_id: str, user_id: int, predictions: list):
-    """Enregistre le ticket de pronostics d'un joueur pour une session donnée."""
     ticket_data = {
         "session_id": session_id,
         "user_id": user_id,
@@ -99,8 +96,5 @@ def save_ticket(session_id: str, user_id: int, predictions: list):
     return res.data[0]
 
 def get_open_duels():
-    """Récupère les duels en attente d'adversaire."""
-    res = supabase.table("sessions").select("*, users(username)").eq("status", "WAITING").eq("type", "DUEL").execute()
+    res = supabase.table("sessions").select("*").eq("status", "WAITING").eq("type", "DUEL").limit(10).execute()
     return res.data
-
-
