@@ -317,7 +317,7 @@ async def start_create_duel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["draft_duel"] = {
         "match_count": 3,       # Nombre par défaut de matchs à sélectionner
         "stake": 100,           # Mise par défaut en Coins
-        "selected_matches": {}, # Format : { match_id: {"match": dict, "pick": "HOME"|"DRAW"|"AWAY"} }
+        "selected_matches": {}, # Format : { match_id: {"match": dict, "pick": "HOME"|"DRAW"|"AWAY"} },
         "current_sport": "FOOTBALL"
     }
     
@@ -494,7 +494,7 @@ async def confirm_duel_creation(update: Update, context: ContextTypes.DEFAULT_TY
     # 1. Vérification du solde utilisateur
     if user.get("coins_balance", 0) < stake:
         await query.edit_message_text(
-            f"❌ Solde insuffisant ! Vous avez **{user.get('coins_balance', 0)} Coins** mais la mise est de **{stake} Coins**.",
+            f"❌ Solde insuffisant ! Vous avez **{user.get('coins_balance', 0)} Coins** mais la mise est de **{stake} Coins}.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour au récapitulatif", callback_data="review_ticket")]])
         )
         return
