@@ -66,66 +66,7 @@ def print_schema_migration_sql():
     return sql
 
 
-def create_sample_matches():
-    """Génère 5 matchs de test pour essayer le système de pronostics.
 
-    Les matchs incluent maintenant le sport et les cotes (home/draw/away) pour être
-    compatibles avec le schéma mis à jour.
-    """
-    sample_matches = [
-        {
-            "api_match_id": 101,
-            "home_team": "Real Madrid",
-            "away_team": "Barcelona",
-            "status": "NS",
-            "sport": "FOOTBALL",
-            "home_odds": 2.0,
-            "draw_odds": 3.0,
-            "away_odds": 2.5,
-        },
-        {
-            "api_match_id": 102,
-            "home_team": "PSG",
-            "away_team": "Marseille",
-            "status": "NS",
-            "sport": "FOOTBALL",
-            "home_odds": 1.8,
-            "draw_odds": 3.2,
-            "away_odds": 4.0,
-        },
-        {
-            "api_match_id": 103,
-            "home_team": "Arsenal",
-            "away_team": "Chelsea",
-            "status": "NS",
-            "sport": "FOOTBALL",
-            "home_odds": 2.1,
-            "draw_odds": 3.1,
-            "away_odds": 3.6,
-        },
-        {
-            "api_match_id": 104,
-            "home_team": "Bayern Munich",
-            "away_team": "Dortmund",
-            "status": "NS",
-            "sport": "FOOTBALL",
-            "home_odds": 1.9,
-            "draw_odds": 3.4,
-            "away_odds": 4.2,
-        },
-        {
-            "api_match_id": 105,
-            "home_team": "Inter Milan",
-            "away_team": "AC Milan",
-            "status": "NS",
-            "sport": "FOOTBALL",
-            "home_odds": 2.5,
-            "draw_odds": 3.0,
-            "away_odds": 2.7,
-        },
-    ]
-    for match in sample_matches:
-        supabase.table("matches").upsert(match, on_conflict="api_match_id").execute()
     return get_active_matches()
 
 
