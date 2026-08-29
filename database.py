@@ -1,5 +1,7 @@
 from supabase import create_client, Client
 import config
+from datetime import datetime
+import time
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 
@@ -67,9 +69,6 @@ def print_schema_migration_sql():
 
 
 
-    return get_active_matches()
-
-
 def get_active_matches():
     """Récupère tous les matchs à venir/non démarrés."""
     response = supabase.table("matches").select("*").eq("status", "NS").execute()
@@ -89,6 +88,43 @@ def get_matches_by_ids(match_ids: list):
     response = supabase.table("matches").select("*").in_("api_match_id", clean_ids).execute()
     by_id = {m["api_match_id"]: m for m in response.data}
     return [by_id[mid] for mid in clean_ids if mid in by_id]
+
+
+def create_sample_match(
+    api_match_id=None,
+    home_team: str = "Home FC",
+    away_team: str = "Away FC",
+    start_time=None,
+    sport: str = "FOOTBALL",
+    home_odds: float = 2.0,
+    draw_odds: float = 3.0,
+    away_odds: float = 2.5,
+    status: str = "NS",
+):
+    """Crée et insère un match factice dans la table `matches` et retourne l'enregistrement inséré.
+
+    - Si `api_match_id` n'est pas fourni, on génère un identifiant basé sur l'horodatage.
+    - `start_time` peut être un datetime; s'il est absent on prend maintenant.
+    """
+    if api_match_id is None:
+        # identifiant simple unique pour les tests (changez la stratégie si besoin)
+        api_match_id = int(time.time())
+
+    record = {
+        "api_match_id": api_match_id,
+        "home_team": home_team,
+        "away_team": away_team,
+        "start_time": (start_time or datetime.utcnow()).isoformat(),
+        "sport": sport,
+        "home_odds": home_odds,
+        "draw_odds": draw_odds,
+        "away_odds": away_odds,
+        "status": status,
+        "result": None,
+    }
+
+    res = supabase.table("matches").insert(record).execute()
+    return res.data[0] if res.data else None
 
 
 def set_match_result(api_match_id: int, result: str):
