@@ -32,14 +32,97 @@ def credit_balance(telegram_id: int, amount: float):
 
 # --- MATCHS ---
 
+def get_schema_migration_sql() -> str:
+    """Retourne les instructions SQL proposées pour mettre à jour le schéma de la base.
+
+    NOTE: supabase-py n'exécute pas d'instructions SQL arbitraires via l'API REST publique.
+    Exécutez ces instructions manuellement dans l'éditeur SQL de Supabase ou via psql
+    en utilisant la clé/service role appropriée.
+    """
+    return """
+-- 1. Ajouter le sport et les cotes dans la table 'matches'
+ALTER TABLE matches 
+ADD COLUMN IF NOT EXISTS sport TEXT DEFAULT 'FOOTBALL',
+ADD COLUMN IF NOT EXISTS home_odds NUMERIC DEFAULT 2.0,
+ADD COLUMN IF NOT EXISTS draw_odds NUMERIC DEFAULT 3.0,
+ADD COLUMN IF NOT EXISTS away_odds NUMERIC DEFAULT 2.5;
+
+-- 2. Ajouter le nombre de matchs requis dans la table 'sessions'
+ALTER TABLE sessions 
+ADD COLUMN IF NOT EXISTS match_count INT DEFAULT 5;
+
+-- 3. S'assurer que la colonne result existe bien dans matches
+ALTER TABLE matches 
+ADD COLUMN IF NOT EXISTS result TEXT;
+"""
+
+
+def print_schema_migration_sql():
+    """Affiche la SQL de migration (utile pour copier-coller dans Supabase).
+    Retourne aussi la chaîne pour usage programmatique.
+    """
+    sql = get_schema_migration_sql()
+    print(sql)
+    return sql
+
+
 def create_sample_matches():
-    """Génère 5 matchs de test pour essayer le système de pronostics."""
+    """Génère 5 matchs de test pour essayer le système de pronostics.
+
+    Les matchs incluent maintenant le sport et les cotes (home/draw/away) pour être
+    compatibles avec le schéma mis à jour.
+    """
     sample_matches = [
-        {"api_match_id": 101, "home_team": "Real Madrid", "away_team": "Barcelona", "status": "NS"},
-        {"api_match_id": 102, "home_team": "PSG", "away_team": "Marseille", "status": "NS"},
-        {"api_match_id": 103, "home_team": "Arsenal", "away_team": "Chelsea", "status": "NS"},
-        {"api_match_id": 104, "home_team": "Bayern Munich", "away_team": "Dortmund", "status": "NS"},
-        {"api_match_id": 105, "home_team": "Inter Milan", "away_team": "AC Milan", "status": "NS"},
+        {
+            "api_match_id": 101,
+            "home_team": "Real Madrid",
+            "away_team": "Barcelona",
+            "status": "NS",
+            "sport": "FOOTBALL",
+            "home_odds": 2.0,
+            "draw_odds": 3.0,
+            "away_odds": 2.5,
+        },
+        {
+            "api_match_id": 102,
+            "home_team": "PSG",
+            "away_team": "Marseille",
+            "status": "NS",
+            "sport": "FOOTBALL",
+            "home_odds": 1.8,
+            "draw_odds": 3.2,
+            "away_odds": 4.0,
+        },
+        {
+            "api_match_id": 103,
+            "home_team": "Arsenal",
+            "away_team": "Chelsea",
+            "status": "NS",
+            "sport": "FOOTBALL",
+            "home_odds": 2.1,
+            "draw_odds": 3.1,
+            "away_odds": 3.6,
+        },
+        {
+            "api_match_id": 104,
+            "home_team": "Bayern Munich",
+            "away_team": "Dortmund",
+            "status": "NS",
+            "sport": "FOOTBALL",
+            "home_odds": 1.9,
+            "draw_odds": 3.4,
+            "away_odds": 4.2,
+        },
+        {
+            "api_match_id": 105,
+            "home_team": "Inter Milan",
+            "away_team": "AC Milan",
+            "status": "NS",
+            "sport": "FOOTBALL",
+            "home_odds": 2.5,
+            "draw_odds": 3.0,
+            "away_odds": 2.7,
+        },
     ]
     for match in sample_matches:
         supabase.table("matches").upsert(match, on_conflict="api_match_id").execute()
@@ -97,6 +180,7 @@ def create_duel_session(creator_id: int, gross_fee: float, match_ids: list):
         "max_players": 2,
         "status": "WAITING",
         "match_ids": match_ids,
+        "match_count": len(match_ids) if match_ids is not None else None,
     }
     session = supabase.table("sessions").insert(session_data).execute()
     return session.data[0], "Succès"
