@@ -148,6 +148,16 @@ def create_sample_match(
     res = supabase.table("matches").insert(record).execute()
     rows = _check_response(res)
     return rows[0] if rows else None
+def create_sample_matches():
+    """Crée plusieurs matchs de test multi-sports."""
+    matches = [
+        {"api_match_id": 101, "home_team": "Real Madrid", "away_team": "Barcelona", "sport": "FOOTBALL", "home_odds": 2.10, "draw_odds": 3.40, "away_odds": 3.10, "status": "NS"},
+        {"api_match_id": 102, "home_team": "PSG", "away_team": "Marseille", "sport": "FOOTBALL", "home_odds": 1.50, "draw_odds": 4.20, "away_odds": 6.00, "status": "NS"},
+        {"api_match_id": 201, "home_team": "Lakers", "away_team": "Celtics", "sport": "BASKETBALL", "home_odds": 1.85, "draw_odds": 15.00, "away_odds": 1.95, "status": "NS"},
+        {"api_match_id": 301, "home_team": "Alcaraz", "away_team": "Sinner", "sport": "TENNIS", "home_odds": 1.90, "draw_odds": 20.00, "away_odds": 1.90, "status": "NS"},
+    ]
+    res = supabase.table("matches").upsert(matches, on_conflict="api_match_id").execute()
+    return _check_response(res)
 
 
 def set_match_result(api_match_id: int, result: str):
