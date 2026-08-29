@@ -369,49 +369,77 @@ async def show_sport_selection_menu(update: Update, context: ContextTypes.DEFAUL
 # ==========================================
 
 async def handle_sport_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche la liste des matchs d'un sport donné avec leurs cotes."""
+    """Affiche la liste des matchs d'un sport avec leur état de sélection et la barre d'action."""
     query = update.callback_query
     await query.answer()
 
-    # Récupération du sport sélectionné
+    # Extraction du sport sélectionné
     sport = query.data.split("_")[1]
-    context.user_data["draft_duel"]["current_sport"] = sport
+    if "draft_duel" not in context.user_data:
+        context.user_data["draft_duel"] = {
+            "match_count": 3,
+            "stake": 100,
+            "selected_matches": {},
+            "current_sport": sport
+        }
+    else:
+        context.user_data["draft_duel"]["current_sport"] = sport
 
-    matches = database.get_matches_by_sport(sport)
     draft = context.user_data.get("draft_duel", {})
     selected_matches = draft.get("selected_matches", {})
+    target_count = draft.get("match_count", 3)
+    selected_count = len(selected_matches)
 
-    if not matches:
-        keyboard = [[InlineKeyboardButton("🔙 Retour aux sports", callback_data="back_to_sports")]]
-        await query.edit_message_text(
-            f"❌ Aucun match à venir disponible pour le **{sport}**.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-        return
+    matches = database.get_matches_by_sport(sport)
 
-    text = f"🏟️ **Matchs disponibles — {sport}**\nSélectionnez vos pronostics (1, N, 2) :\n\n"
     keyboard = []
 
-    for m in matches:
-        m_id = int(m["api_match_id"])
-        is_selected = m_id in selected_matches
-        current_pick = selected_matches[m_id]["pick"] if is_selected else None
+    if not matches:
+        text = f"❌ Aucun match disponible actuellement pour le **{sport}**."
+    else:
+        text = (
+            f"🏟️ **Matchs — {sport}**\n"
+            f"📊 Progression : **{selected_count} / {target_count} match(s)**\n\n"
+            f"Cliquez sur 1, N ou 2 pour ajouter/retirer un choix :\n\n"
+        )
 
-        # Libellés des boutons avec indicateur visuel si sélectionné
-        btn_h = f"1 ({m.get('home_odds', 1.0)})" + (" ✅" if current_pick == "HOME" else "")
-        btn_d = f"N ({m.get('draw_odds', 1.0)})" + (" ✅" if current_pick == "DRAW" else "")
-        btn_a = f"2 ({m.get('away_odds', 1.0)})" + (" ✅" if current_pick == "AWAY" else "")
+        for m in matches:
+            m_id = int(m["api_match_id"])
+            is_selected = m_id in selected_matches
+            current_pick = selected_matches[m_id]["pick"] if is_selected else None
 
-        keyboard.append([InlineKeyboardButton(f"📌 {m['home_team']} vs {m['away_team']}", callback_data=f"ignore_{m_id}")])
-        keyboard.append([
-            InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
-            InlineKeyboardButton(btn_d, callback_data=f"pick_{m_id}_DRAW"),
-            InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY"),
-        ])
+            # Boutons 1 - N - 2 avec coche de confirmation visuelle
+            btn_h = f"1 ({m.get('home_odds', 1.0)})" + (" ✅" if current_pick == "HOME" else "")
+            btn_d = f"N ({m.get('draw_odds', 1.0)})" + (" ✅" if current_pick == "DRAW" else "")
+            btn_a = f"2 ({m.get('away_odds', 1.0)})" + (" ✅" if current_pick == "AWAY" else "")
 
-    keyboard.append([InlineKeyboardButton("🔙 Retour aux sports", callback_data="back_to_sports")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            # Intitulé du match
+            keyboard.append([InlineKeyboardButton(f"⚽ {m['home_team']} vs {m['away_team']}", callback_data=f"ignore_{m_id}")])
+            # Ligne des cotes
+            keyboard.append([
+                InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
+                InlineKeyboardButton(btn_d, callback_data=f"pick_{m_id}_DRAW"),
+                InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY"),
+            ])
+
+    # --- BARRE DE NAVIGATION EN BAS DU MENU ---
+    navigation_row = []
+
+    # Le bouton de récapitulatif s'affiche dès que le quota est atteint
+    if selected_count == target_count:
+        keyboard.append([InlineKeyboardButton("✅ Valider & Récapitulatif", callback_data="review_ticket")])
+
+    # Bouton d'annulation et de retour au menu des sports toujours présents
+    keyboard.append([
+        InlineKeyboardButton("🔙 Menu Sports", callback_data="back_to_sports"),
+        InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")
+    ])
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
 
 
 async def handle_pick_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -445,6 +473,53 @@ async def handle_pick_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Rafrachit la liste des matchs pour mettre à jour l'affichage des boutons
     await handle_sport_selection(update, context)
+
+
+async def handle_ignore(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ignore les clics sur les en-têtes de matchs et affiche le détail rapide du match + actions."""
+    query = update.callback_query
+    await query.answer()
+
+    # Récupère l'id de match depuis le callback data ignore_<id>
+    try:
+        m_id = int(query.data.split("_")[1])
+    except Exception:
+        await query.answer("Identifiant de match invalide.", show_alert=True)
+        return
+
+    matches = database.get_matches_by_ids([m_id])
+    if not matches:
+        await query.edit_message_text("❌ Match introuvable ou expiré.")
+        return
+
+    m = matches[0]
+    text = (
+        f"🏟️ **Détail du match**\n\n"
+        f"**{m['home_team']}** vs **{m['away_team']}**\n"
+        f"Sport: {m.get('sport', 'N/A')}\n"
+        f"Heure: {m.get('start_time', 'N/A')}\n"
+        f"Cotes: 1 ({m.get('home_odds', 1.0)}) — N ({m.get('draw_odds', 1.0)}) — 2 ({m.get('away_odds', 1.0)})\n\n"
+        "Choisissez un pronostic ci-dessous :"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(f"1 ({m.get('home_odds', 1.0)})", callback_data=f"pick_{m_id}_HOME"),
+            InlineKeyboardButton(f"N ({m.get('draw_odds', 1.0)})", callback_data=f"pick_{m_id}_DRAW"),
+            InlineKeyboardButton(f"2 ({m.get('away_odds', 1.0)})", callback_data=f"pick_{m_id}_AWAY"),
+        ],
+        [InlineKeyboardButton("🔙 Retour aux matchs", callback_data=f"sport_{m.get('sport','FOOTBALL')}")]
+    ]
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def cancel_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Annule la création et vide le panier temporaire."""
+    query = update.callback_query
+    await query.answer("Création annulée.")
+    context.user_data.pop("draft_duel", None)
+    await query.edit_message_text("❌ Création du duel annulée.")
 
 
 # ==========================================
@@ -633,6 +708,9 @@ telegram_app.add_handler(CallbackQueryHandler(handle_sport_selection, pattern="^
 telegram_app.add_handler(CallbackQueryHandler(handle_pick_selection, pattern="^pick_"))
 telegram_app.add_handler(CallbackQueryHandler(show_ticket_review, pattern="^review_ticket$"))
 telegram_app.add_handler(CallbackQueryHandler(confirm_duel_creation, pattern="^confirm_duel_creation$"))
+# Handler pour l'en-tête des matchs (ignore) et annulation
+telegram_app.add_handler(CallbackQueryHandler(handle_ignore, pattern="^ignore_"))
+telegram_app.add_handler(CallbackQueryHandler(cancel_creation, pattern="^cancel_creation$"))
 
 telegram_app.add_error_handler(error_handler)
 
