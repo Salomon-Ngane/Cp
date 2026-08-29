@@ -56,9 +56,15 @@ def get_matches_by_ids(match_ids: list):
     """Récupère des matchs précis (sert à figer la grille d'un duel), dans l'ordre demandé."""
     if not match_ids:
         return []
-    response = supabase.table("matches").select("*").in_("api_match_id", match_ids).execute()
+    
+    # Conversion de la liste d'identifiants en entiers pour la requête SQL
+    clean_ids = [int(mid) for mid in match_ids if str(mid).isdigit()]
+    if not clean_ids:
+        return []
+
+    response = supabase.table("matches").select("*").in_("api_match_id", clean_ids).execute()
     by_id = {m["api_match_id"]: m for m in response.data}
-    return [by_id[mid] for mid in match_ids if mid in by_id]
+    return [by_id[mid] for mid in clean_ids if mid in by_id]
 
 
 def set_match_result(api_match_id: int, result: str):
@@ -169,24 +175,33 @@ def save_ticket(session_id: str, user_id: int, predictions: list):
 
 def find_resolvable_sessions(api_match_id: int):
     """
-    Sessions IN_PROGRESS contenant ce match, et dont tous les matchs de la grille
-    ont désormais un résultat enregistré.
-    NB : repose sur l'opérateur de containment jsonb de PostgREST (.contains) —
-    à vérifier une fois en conditions réelles selon la version de supabase-py utilisée.
+    Parcourt toutes les sessions IN_PROGRESS et retourne celles qui contiennent
+    le match résolu, SI tous les matchs de leur grille sont désormais FINISHED.
     """
     res = (
         supabase.table("sessions")
         .select("*")
         .eq("status", "IN_PROGRESS")
         .eq("type", "DUEL")
-        .contains("match_ids", [api_match_id])
         .execute()
     )
+
     resolvable = []
+    target_id = int(api_match_id)
+
     for session in res.data:
-        matches = get_matches_by_ids(session["match_ids"])
-        if matches and all(m.get("result") for m in matches):
-            resolvable.append(session)
+        m_ids = session.get("match_ids") or []
+
+        # Convertit la liste en int pour éviter les incompatibilités de types (str vs int)
+        normalized_ids = [int(mid) for mid in m_ids if str(mid).isdigit()]
+
+        # Si le match qu'on vient de résoudre fait partie de ce duel
+        if target_id in normalized_ids:
+            # On vérifie si TOUS les matchs du duel ont un résultat
+            matches = get_matches_by_ids(normalized_ids)
+            if matches and all(m.get("result") for m in matches):
+                resolvable.append(session)
+
     return resolvable
 
 
