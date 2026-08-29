@@ -5,14 +5,29 @@ import time
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 
+VALID_PICKS = {"HOME", "DRAW", "AWAY"}
+
+
+def _check_response(res):
+    """Vérifie la réponse Supabase et lève une exception simple en cas d'erreur.
+    Retourne res.data ou [] si absent.
+    """
+    if res is None:
+        raise RuntimeError("Supabase response is None")
+    if getattr(res, "error", None):
+        raise RuntimeError(f"Supabase error: {res.error}")
+    return getattr(res, "data", []) or []
+
 
 # --- UTILISATEURS ---
 
+
 def get_or_create_user(telegram_id: int, username: str, referred_by: int = None):
-    """Récupère l'utilisateur ou le crée avec un solde initial de 0."""
+    """Récupère l'utilisateur ou le crée avec un solde initial de 0 (upsert pour éviter les races)."""
     res = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
-    if res.data:
-        return res.data[0]
+    data = _check_response(res)
+    if data:
+        return data[0]
 
     new_user = {
         "telegram_id": telegram_id,
@@ -20,19 +35,23 @@ def get_or_create_user(telegram_id: int, username: str, referred_by: int = None)
         "coins_balance": 0,
         "referred_by": referred_by,
     }
-    insert_res = supabase.table("users").insert(new_user).execute()
-    return insert_res.data[0]
+    # upsert pour éviter les doublons en cas d'appels concurrents
+    insert_res = supabase.table("users").upsert(new_user, on_conflict="telegram_id").execute()
+    inserted = _check_response(insert_res)
+    return inserted[0]
 
 
 def credit_balance(telegram_id: int, amount: float):
     """Ajoute `amount` au solde d'un utilisateur (recharge admin ou paiement de gain)."""
     user = get_or_create_user(telegram_id, "")
-    new_balance = user["coins_balance"] + amount
-    supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", telegram_id).execute()
+    new_balance = user.get("coins_balance", 0) + amount
+    res = supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", telegram_id).execute()
+    _check_response(res)
     return new_balance
 
 
 # --- MATCHS ---
+
 
 def get_schema_migration_sql() -> str:
     """Retourne les instructions SQL proposées pour mettre à jour le schéma de la base.
@@ -68,25 +87,26 @@ def print_schema_migration_sql():
     return sql
 
 
-
 def get_active_matches():
     """Récupère tous les matchs à venir/non démarrés."""
     response = supabase.table("matches").select("*").eq("status", "NS").execute()
-    return response.data
+    return _check_response(response)
 
 
 def get_matches_by_ids(match_ids: list):
     """Récupère des matchs précis (sert à figer la grille d'un duel), dans l'ordre demandé."""
     if not match_ids:
         return []
-    
+
     # Conversion de la liste d'identifiants en entiers pour la requête SQL
     clean_ids = [int(mid) for mid in match_ids if str(mid).isdigit()]
     if not clean_ids:
         return []
 
     response = supabase.table("matches").select("*").in_("api_match_id", clean_ids).execute()
-    by_id = {m["api_match_id"]: m for m in response.data}
+    rows = _check_response(response)
+    # Normaliser les clefs en int pour éviter les problèmes de type
+    by_id = {int(m["api_match_id"]): m for m in rows}
     return [by_id[mid] for mid in clean_ids if mid in by_id]
 
 
@@ -110,11 +130,13 @@ def create_sample_match(
         # identifiant simple unique pour les tests (changez la stratégie si besoin)
         api_match_id = int(time.time())
 
+    ts = (start_time or datetime.utcnow()).replace(microsecond=0).isoformat() + "Z"
+
     record = {
         "api_match_id": api_match_id,
         "home_team": home_team,
         "away_team": away_team,
-        "start_time": (start_time or datetime.utcnow()).isoformat(),
+        "start_time": ts,
         "sport": sport,
         "home_odds": home_odds,
         "draw_odds": draw_odds,
@@ -124,30 +146,43 @@ def create_sample_match(
     }
 
     res = supabase.table("matches").insert(record).execute()
-    return res.data[0] if res.data else None
+    rows = _check_response(res)
+    return rows[0] if rows else None
 
 
 def set_match_result(api_match_id: int, result: str):
     """Enregistre le résultat d'un match (HOME / DRAW / AWAY) et le marque comme terminé."""
-    supabase.table("matches").update({
+    if result not in VALID_PICKS:
+        raise ValueError("Result must be one of HOME, DRAW, AWAY")
+    res = supabase.table("matches").update({
         "status": "FINISHED",
         "result": result,
     }).eq("api_match_id", api_match_id).execute()
+    _check_response(res)
 
 
 # --- DUELS (SESSIONS) ---
 
-def create_duel_session(creator_id: int, gross_fee: float, match_ids: list):
-    """Crée une session de duel 1v1 : prélève la mise brute et fige la liste des matchs jouée."""
+
+def create_duel_session(creator_id: int, gross_fee: float, match_ids: list, creator_predictions: list = None):
+    """Crée une session de duel 1v1 : prélève la mise brute et fige la liste des matchs jouée.
+
+    Note: pour limiter les races, l'opération de débit est conditionnelle sur le solde actuel
+    (on ajoute une clause .eq("coins_balance", <old_balance>) pour échouer proprement en cas de concurrence).
+    """
     user = get_or_create_user(creator_id, "")
-    if user["coins_balance"] < gross_fee:
+    if user.get("coins_balance", 0) < gross_fee:
         return None, "Solde insuffisant"
 
     rake = gross_fee * config.RAKE_PERCENTAGE
     net_fee = gross_fee - rake
 
     new_balance = user["coins_balance"] - gross_fee
-    supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", creator_id).execute()
+    # Tentative d'update conditionnelle pour éviter la concurrence
+    upd = supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", creator_id).eq("coins_balance", user["coins_balance"]).execute()
+    updated_rows = _check_response(upd)
+    if not updated_rows:
+        return None, "Échec du débit (conflit de concurrence). Réessayez."
 
     session_data = {
         "creator_id": creator_id,
@@ -160,13 +195,21 @@ def create_duel_session(creator_id: int, gross_fee: float, match_ids: list):
         "match_count": len(match_ids) if match_ids is not None else None,
     }
     session = supabase.table("sessions").insert(session_data).execute()
-    return session.data[0], "Succès"
+    session_rows = _check_response(session)
+    session_row = session_rows[0]
+
+    # Si le créateur a fourni ses prédictions lors de la création du duel, on enregistre son ticket.
+    if creator_predictions:
+        save_ticket(session_row["id"], creator_id, creator_predictions)
+
+    return session_row, "Succès"
 
 
 def get_session(session_id: str):
     """Récupère une session par son id."""
     res = supabase.table("sessions").select("*").eq("id", session_id).execute()
-    return res.data[0] if res.data else None
+    rows = _check_response(res)
+    return rows[0] if rows else None
 
 
 def get_open_duels(exclude_creator_id: int = None):
@@ -175,7 +218,7 @@ def get_open_duels(exclude_creator_id: int = None):
     if exclude_creator_id is not None:
         query = query.neq("creator_id", exclude_creator_id)
     res = query.execute()
-    return res.data
+    return _check_response(res)
 
 
 def join_duel_session(session_id: str, joiner_id: int, predictions: list):
@@ -193,14 +236,17 @@ def join_duel_session(session_id: str, joiner_id: int, predictions: list):
 
     gross_fee = session["gross_entry_fee"]
     joiner = get_or_create_user(joiner_id, "")
-    if joiner["coins_balance"] < gross_fee:
+    if joiner.get("coins_balance", 0) < gross_fee:
         return None, f"Solde insuffisant (il vous faut {gross_fee} Coins)."
 
     new_balance = joiner["coins_balance"] - gross_fee
-    supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", joiner_id).execute()
+    # Update conditionnel pour éviter les races
+    upd = supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", joiner_id).eq("coins_balance", joiner["coins_balance"]).execute()
+    updated_rows = _check_response(upd)
+    if not updated_rows:
+        return None, "Échec du débit (conflit de concurrence). Réessayez."
 
     # Le .eq("status", "WAITING") protège contre une double-jointure concurrente :
-    # si un autre joueur a rejoint entre notre lecture et notre écriture, 0 ligne est mise à jour.
     updated = (
         supabase.table("sessions")
         .update({"opponent_id": joiner_id, "status": "IN_PROGRESS"})
@@ -209,19 +255,51 @@ def join_duel_session(session_id: str, joiner_id: int, predictions: list):
         .execute()
     )
 
-    if not updated.data:
+    updated_data = _check_response(updated)
+    if not updated_data:
         # Remboursement : quelqu'un d'autre a rejoint entre-temps
         supabase.table("users").update({"coins_balance": joiner["coins_balance"]}).eq("telegram_id", joiner_id).execute()
         return None, "Un autre joueur vient de rejoindre ce duel juste avant vous."
 
+    # Valider et enregistrer le ticket du joiner
     save_ticket(session_id, joiner_id, predictions)
-    return updated.data[0], "Succès"
+    return updated_data[0], "Succès"
 
 
 # --- TICKETS ---
 
+
+def validate_predictions(preds, expected_match_ids=None):
+    if not isinstance(preds, list):
+        return False
+    for p in preds:
+        if not isinstance(p, dict):
+            return False
+        if "match_id" not in p or "pick" not in p:
+            return False
+        try:
+            mid = int(p["match_id"])
+        except Exception:
+            return False
+        if expected_match_ids is not None and mid not in expected_match_ids:
+            return False
+        if p["pick"] not in VALID_PICKS:
+            return False
+    return True
+
+
 def save_ticket(session_id: str, user_id: int, predictions: list):
     """Enregistre le ticket de pronostics d'un joueur pour une session donnée."""
+    # On valide la structure minimale des prédictions
+    session = get_session(session_id)
+    expected_ids = None
+    if session:
+        m_ids = session.get("match_ids") or []
+        expected_ids = [int(x) for x in m_ids if str(x).isdigit()]
+
+    if not validate_predictions(predictions, expected_match_ids=expected_ids):
+        raise ValueError("Predictions invalides ou ne correspondent pas aux match_ids de la session")
+
     ticket_data = {
         "session_id": session_id,
         "user_id": user_id,
@@ -229,10 +307,12 @@ def save_ticket(session_id: str, user_id: int, predictions: list):
         "status": "PENDING",
     }
     res = supabase.table("tickets").insert(ticket_data).execute()
-    return res.data[0]
+    rows = _check_response(res)
+    return rows[0]
 
 
 # --- RÉSOLUTION & PAIEMENT ---
+
 
 def find_resolvable_sessions(api_match_id: int):
     """
@@ -247,10 +327,11 @@ def find_resolvable_sessions(api_match_id: int):
         .execute()
     )
 
+    rows = _check_response(res)
     resolvable = []
     target_id = int(api_match_id)
 
-    for session in res.data:
+    for session in rows:
         m_ids = session.get("match_ids") or []
 
         # Convertit la liste en int pour éviter les incompatibilités de types (str vs int)
@@ -269,30 +350,34 @@ def find_resolvable_sessions(api_match_id: int):
 def resolve_duel(session_id: str):
     """Compare les deux tickets d'un duel, désigne un gagnant (ou partage en cas d'égalité) et paie."""
     session = get_session(session_id)
-    if not session or session["status"] != "IN_PROGRESS":
+    if not session or session.get("status") != "IN_PROGRESS":
         return None
 
     tickets_res = supabase.table("tickets").select("*").eq("session_id", session_id).execute()
-    tickets = tickets_res.data
+    tickets = _check_response(tickets_res)
     if len(tickets) != 2:
         return None  # sécurité : un duel doit avoir exactement 2 tickets pour être résolu
 
-    matches = get_matches_by_ids(session["match_ids"])
-    results_by_match = {m["api_match_id"]: m.get("result") for m in matches}
+    matches = get_matches_by_ids(session.get("match_ids") or [])
+    results_by_match = {int(m["api_match_id"]): m.get("result") for m in matches}
 
     scores = {}
     for ticket in tickets:
-        correct = sum(
-            1 for p in ticket["predictions"]
-            if results_by_match.get(p["match_id"]) == p["pick"]
-        )
+        correct = 0
+        for p in ticket.get("predictions", []):
+            try:
+                mid = int(p.get("match_id"))
+            except Exception:
+                continue
+            if results_by_match.get(mid) == p.get("pick"):
+                correct += 1
         scores[ticket["user_id"]] = correct
 
-    creator_id = session["creator_id"]
-    opponent_id = session["opponent_id"]
+    creator_id = session.get("creator_id")
+    opponent_id = session.get("opponent_id")
     creator_score = scores.get(creator_id, 0)
     opponent_score = scores.get(opponent_id, 0)
-    pot = session["net_entry_fee"] * 2
+    pot = (session.get("net_entry_fee") or 0) * 2
 
     if creator_score > opponent_score:
         winner_id = creator_id
