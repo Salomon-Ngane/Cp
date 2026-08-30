@@ -60,6 +60,22 @@ def get_matches_by_sport(sport: str):
     response = supabase.table("matches").select("*").eq("status", "NS").ilike("sport", f"%{sport}%").execute()
     return response.data
 
+def get_matches_by_ids(match_ids: list):
+    """Récupère des matchs précis à partir d'une liste d'ids (texte, format TheOddsAPI)."""
+    if not match_ids:
+        return []
+    ids = [str(mid) for mid in match_ids]
+    response = supabase.table("matches").select("*").in_("api_match_id", ids).execute()
+    by_id = {str(m["api_match_id"]): m for m in response.data}
+    return [by_id[mid] for mid in ids if mid in by_id]
+
+def set_match_result(api_match_id, result: str):
+    """Enregistre le résultat d'un match (HOME / DRAW / AWAY) et le marque comme terminé."""
+    supabase.table("matches").update({
+        "status": "FINISHED",
+        "result": result,
+    }).eq("api_match_id", str(api_match_id)).execute()
+
 def get_session(session_id: str):
     res = supabase.table("sessions").select("*").eq("id", session_id).execute()
     return res.data[0] if res.data else None
@@ -131,23 +147,129 @@ def save_ticket(session_id: str, user_id: int, predictions: list):
     }
     return supabase.table("tickets").insert(ticket_data).execute().data[0]
 
+
+# --- RÉSOLUTION & PAIEMENT ---
+# NB : depuis la refonte multi-sport, chaque joueur a sa PROPRE grille (match_count
+# les matche seulement en nombre, pas en contenu). "Tous les matchs d'une session"
+# n'existe donc plus au niveau de la session — on le reconstruit à partir de l'union
+# des deux tickets à chaque résolution.
+
+def find_resolvable_sessions(api_match_id) -> list:
+    """Sessions IN_PROGRESS contenant ce match (dans l'un ou l'autre ticket),
+    et dont TOUS les matchs des deux grilles ont désormais un résultat."""
+    sessions = (
+        supabase.table("sessions").select("*")
+        .eq("status", "IN_PROGRESS").eq("type", "DUEL").execute().data
+    )
+    target = str(api_match_id)
+    resolvable = []
+
+    for session in sessions:
+        tickets = supabase.table("tickets").select("*").eq("session_id", session["id"]).execute().data
+        if len(tickets) != 2:
+            continue
+
+        all_match_ids = set()
+        for t in tickets:
+            all_match_ids.update(str(p["match_id"]) for p in t["predictions"])
+
+        if target not in all_match_ids:
+            continue
+
+        matches = get_matches_by_ids(list(all_match_ids))
+        if len(matches) == len(all_match_ids) and all(m.get("result") for m in matches):
+            resolvable.append(session)
+
+    return resolvable
+
+
+def resolve_duel(session_id: str):
+    """Compare les deux grilles (indépendantes) d'un duel, désigne un vainqueur
+    (ou partage en cas d'égalité) et paie la cagnotte."""
+    session = get_session(session_id)
+    if not session or session["status"] != "IN_PROGRESS":
+        return None
+
+    tickets = supabase.table("tickets").select("*").eq("session_id", session_id).execute().data
+    if len(tickets) != 2:
+        return None
+
+    all_match_ids = set()
+    for t in tickets:
+        all_match_ids.update(str(p["match_id"]) for p in t["predictions"])
+    matches = get_matches_by_ids(list(all_match_ids))
+    results_by_match = {str(m["api_match_id"]): m.get("result") for m in matches}
+
+    scores = {}
+    for ticket in tickets:
+        correct = sum(
+            1 for p in ticket["predictions"]
+            if results_by_match.get(str(p["match_id"])) == p["pick"]
+        )
+        scores[ticket["user_id"]] = correct
+
+    creator_id = session["creator_id"]
+    opponent_id = session["opponent_id"]
+    creator_score = scores.get(creator_id, 0)
+    opponent_score = scores.get(opponent_id, 0)
+    pot = session["net_entry_fee"] * 2
+
+    if creator_score > opponent_score:
+        winner_id = creator_id
+        credit_balance(creator_id, pot)
+    elif opponent_score > creator_score:
+        winner_id = opponent_id
+        credit_balance(opponent_id, pot)
+    else:
+        winner_id = None
+        credit_balance(creator_id, pot / 2)
+        credit_balance(opponent_id, pot / 2)
+
+    supabase.table("sessions").update({"status": "COMPLETED", "winner_id": winner_id}).eq("id", session_id).execute()
+    supabase.table("tickets").update({"status": "RESOLVED"}).eq("session_id", session_id).execute()
+
+    return {
+        "session_id": session_id,
+        "creator_id": creator_id,
+        "opponent_id": opponent_id,
+        "creator_score": creator_score,
+        "opponent_score": opponent_score,
+        "winner_id": winner_id,
+        "pot": pot,
+    }
+
+
 # --- ADMIN FUNCTIONS ---
 
 async def sync_matches_from_api_async():
     try:
         matches, quota = await odds_api.sync_today_matches(config.ODDS_API_KEY)
         if not matches:
-            return 0, "Aucun match trouvé pour aujourd'hui."
-        
+            return 0, "🔍 Aucun match trouvé pour aujourd'hui. Réessaie plus tard, le calendrier se remplit au fil de la journée !"
+
+        saved = 0
+        last_error = None
         for match in matches:
             try:
                 supabase.table("matches").upsert(match, on_conflict="api_match_id").execute()
-            except Exception:
-                try:
-                    supabase.table("matches").insert(match).execute()
-                except Exception:
-                    pass
-        
-        return len(matches), f"✅ {len(matches)} matchs synchronisés. Quota API restant : {quota}"
+                saved += 1
+            except Exception as e:
+                last_error = str(e)
+
+        if saved == 0:
+            return 0, (
+                f"❌ {len(matches)} matchs récupérés depuis l'API, mais AUCUN n'a pu être écrit en base.\n"
+                f"Dernière erreur Supabase : `{last_error}`\n\n"
+                "Piste probable : `api_match_id` n'a plus de contrainte UNIQUE après son passage en texte "
+                "(vérifie dans Supabase), ou la clé utilisée par le bot n'est plus `service_role` (RLS)."
+            )
+        if saved < len(matches):
+            return saved, f"⚠️ {saved}/{len(matches)} matchs enregistrés, le reste a échoué.\nDernière erreur : `{last_error}`"
+
+        return saved, (
+            f"🎉 **{saved} matchs sont sur le terrain et prêts à jouer !**\n"
+            "🏅 Foot, Basket, Tennis — la journée est chargée.\n"
+            f"📊 Requêtes API restantes ce mois-ci : `{quota}`"
+        )
     except Exception as e:
-        return 0, f"❌ Erreur lors de la synchronisation : {str(e)}"
+        return 0, f"❌ Erreur pendant la synchronisation : `{str(e)}`"
