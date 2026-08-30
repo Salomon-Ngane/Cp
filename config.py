@@ -7,7 +7,6 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY")  # obsolète, remplacé par ODDS_API_KEY
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 
 # Paramètres de l'Économie
