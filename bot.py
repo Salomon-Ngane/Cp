@@ -211,7 +211,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
 # ==========================================
-# 3. GESTION DU REPOSITAIRE ET PANIER MULTI-SPORTS
+# 3. GESTION DU REPERTOIRE ET PANIER MULTI-SPORTS
 # ==========================================
 
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -302,15 +302,24 @@ async def show_matches_for_sport(query, context, sport):
             current_pick = selected[m_id]["pick"] if m_id in selected else None
 
             btn_h = f"1 ({m.get('odds_home', 1.0)})" + (" ✅" if current_pick == "HOME" else "")
-            btn_d = f"N ({m.get('odds_draw', 1.0)})" + (" ✅" if current_pick == "DRAW" else "")
             btn_a = f"2 ({m.get('odds_away', 1.0)})" + (" ✅" if current_pick == "AWAY" else "")
 
             keyboard.append([InlineKeyboardButton(f"⚽ {m['home_team']} vs {m['away_team']}", callback_data="ignore")])
-            keyboard.append([
-                InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
-                InlineKeyboardButton(btn_d, callback_data=f"pick_{m_id}_DRAW"),
-                InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY"),
-            ])
+            
+            # Si le sport autorise le nul (Football)
+            if m.get("odds_draw"):
+                btn_d = f"N ({m.get('odds_draw', 1.0)})" + (" ✅" if current_pick == "DRAW" else "")
+                keyboard.append([
+                    InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
+                    InlineKeyboardButton(btn_d, callback_data=f"pick_{m_id}_DRAW"),
+                    InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY"),
+                ])
+            else:
+                # Tennis / Basket (1 ou 2 uniquement)
+                keyboard.append([
+                    InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
+                    InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY"),
+                ])
 
     if len(selected) >= 1:
         keyboard.append([InlineKeyboardButton(f"✅ Voir Récapitulatif ({len(selected)}/{target_count})", callback_data="review_ticket")])
@@ -404,7 +413,7 @@ async def confirm_duel_final(query, context, user_id):
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-# --- RECORDERS HANDLERS ---
+# --- ENREGISTREMENT DES HANDLERS ---
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CallbackQueryHandler(button_handler))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
