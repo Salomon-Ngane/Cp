@@ -250,10 +250,10 @@ async def init_draft_duel(query_or_dummy, context, user_id, stake):
         )
         return
 
+    # Taille dynamique : pas de limite fixée à l'avance
     context.user_data["draft_duel"] = {
         "mode": "create",
         "stake": stake,
-        "match_count": 3,  # Par défaut 3 matchs
         "selected_matches": {}
     }
     await show_sport_selection_menu(query_or_dummy, context)
@@ -262,20 +262,19 @@ async def init_draft_duel(query_or_dummy, context, user_id, stake):
 async def show_sport_selection_menu(query, context):
     draft = context.user_data.get("draft_duel", {})
     selected = draft.get("selected_matches", {})
-    target_count = draft.get("match_count", 3)
 
     text = (
         f"🏟️ **Sélection de Sport pour votre Ticket**\n\n"
         f"💰 **Mise :** `{draft.get('stake', 100)}` Coins\n"
-        f"🎯 **Matchs à choisir :** `{len(selected)} / {target_count}`\n\n"
-        "Choisissez une discipline :"
+        f"🎯 **Matchs sélectionnés :** `{len(selected)}` match(s)\n\n"
+        "Choisissez une discipline pour ajouter des matchs :"
     )
     keyboard = [
         [InlineKeyboardButton("⚽ Football", callback_data="sport_soccer"), InlineKeyboardButton("🏀 Basketball", callback_data="sport_basketball")],
         [InlineKeyboardButton("🎾 Tennis", callback_data="sport_tennis")],
     ]
-    if len(selected) > 0:
-        keyboard.append([InlineKeyboardButton(f"✅ Voir mon Récapitulatif ({len(selected)}/{target_count})", callback_data="review_ticket")])
+    if len(selected) >= 1:
+        keyboard.append([InlineKeyboardButton(f"✅ Voir / Valider mon Ticket ({len(selected)} match(s))", callback_data="review_ticket")])
     keyboard.append([InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -285,7 +284,6 @@ async def show_matches_for_sport(query, context, sport):
     draft = context.user_data.get("draft_duel", {})
     draft["current_sport"] = sport
     selected = draft.get("selected_matches", {})
-    target_count = draft.get("match_count", 3)
 
     matches = database.get_matches_by_sport(sport)
     keyboard = []
@@ -295,7 +293,7 @@ async def show_matches_for_sport(query, context, sport):
     else:
         text = (
             f"🏟️ **Matchs — {sport.upper()}**\n"
-            f"📊 Progression : **{len(selected)} / {target_count} match(s)**\n\n"
+            f"📊 Matchs actuellement au panier : **{len(selected)}**\n\n"
         )
         for m in matches:
             m_id = str(m["api_match_id"])
@@ -304,25 +302,24 @@ async def show_matches_for_sport(query, context, sport):
             btn_h = f"1 ({m.get('odds_home', 1.0)})" + (" ✅" if current_pick == "HOME" else "")
             btn_a = f"2 ({m.get('odds_away', 1.0)})" + (" ✅" if current_pick == "AWAY" else "")
 
-            keyboard.append([InlineKeyboardButton(f"⚽ {m['home_team']} vs {m['away_team']}", callback_data="ignore")])
+            keyboard.append([InlineKeyboardButton(f"🏟️ {m['home_team']} vs {m['away_team']}", callback_data="ignore")])
             
-            # Si le sport autorise le nul (Football)
             if m.get("odds_draw"):
-                btn_d = f"N ({m.get('odds_draw', 1.0)})" + (" ✅" if current_pick == "DRAW" else "")
+                btn_d = f"N ({m.get('odds_draw')})" + (" ✅" if current_pick == "DRAW" else "")
                 keyboard.append([
                     InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
                     InlineKeyboardButton(btn_d, callback_data=f"pick_{m_id}_DRAW"),
                     InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY"),
                 ])
             else:
-                # Tennis / Basket (1 ou 2 uniquement)
                 keyboard.append([
                     InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
                     InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY"),
                 ])
 
     if len(selected) >= 1:
-        keyboard.append([InlineKeyboardButton(f"✅ Voir Récapitulatif ({len(selected)}/{target_count})", callback_data="review_ticket")])
+        keyboard.append([InlineKeyboardButton(f"✅ Voir Récapitulatif ({len(selected)} match(s))", callback_data="review_ticket")])
+    
     keyboard.append([
         InlineKeyboardButton("🔙 Changer de Sport", callback_data="back_to_sports"),
         InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")
@@ -335,27 +332,27 @@ async def show_ticket_review(query, context):
     draft = context.user_data.get("draft_duel", {})
     selected = draft.get("selected_matches", {})
     stake = draft.get("stake", 100)
-    target_count = draft.get("match_count", 3)
+    total_count = len(selected)
 
     text = (
         f"📋 **Récapitulatif de votre Ticket**\n\n"
         f"💰 **Mise engagée :** `{stake}` Coins\n"
-        f"🎯 **Sélections :** `{len(selected)} / {target_count}` match(s)\n\n"
+        f"🎯 **Nombre de matchs retenus :** `{total_count}`\n\n"
         "--- **Vos Choix** ---\n"
     )
     for m_id, item in selected.items():
         m = item["match"]
         pick = item["pick"]
         pick_label = m["home_team"] if pick == "HOME" else (m["away_team"] if pick == "AWAY" else "Nul")
-        text += f"• **[{m.get('sport', 'SPORT')}]** {m['home_team']} vs {m['away_team']} ➔ **{pick_label}**\n"
+        text += f"• **[{m.get('sport', 'SPORT').upper()}]** {m['home_team']} vs {m['away_team']} ➔ **{pick_label}**\n"
 
     keyboard = []
-    if len(selected) == target_count:
-        keyboard.append([InlineKeyboardButton("🚀 Valider & Engager mes Coins", callback_data="confirm_duel_creation")])
+    if total_count >= 1:
+        keyboard.append([InlineKeyboardButton(f"🚀 Valider le Duel ({total_count} match(s))", callback_data="confirm_duel_creation")])
     else:
-        text += f"\n⚠️ *Veuillez choisir exactement {target_count} matchs pour valider.*"
+        text += "\n⚠️ *Veuillez choisir au moins 1 match pour valider votre ticket.*"
 
-    keyboard.append([InlineKeyboardButton("✏️ Modifier mes Choix", callback_data="back_to_sports")])
+    keyboard.append([InlineKeyboardButton("➕ Ajouter d'autres matchs", callback_data="back_to_sports")])
     keyboard.append([InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
