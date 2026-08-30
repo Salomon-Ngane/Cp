@@ -86,6 +86,69 @@ async def propose_join_duel(message, user_id, session_id, context):
 # COMMANDES ADMINISTRATEUR
 # ==========================================
 
+async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    args = context.args
+    if len(args) != 2 or args[1].upper() not in ("HOME", "DRAW", "AWAY"):
+        await update.message.reply_text("❌ Usage : /resolve [api_match_id] [HOME|DRAW|AWAY]")
+        return
+
+    api_match_id = _clean_number(args[0])
+    result = args[1].upper()
+    database.set_match_result(api_match_id, result)
+
+    resolvable = database.find_resolvable_sessions(api_match_id)
+    resolved_count = 0
+    for session in resolvable:
+        outcome = database.resolve_duel(session["id"])
+        if outcome:
+            resolved_count += 1
+            await notify_duel_result(context, outcome)
+
+    await update.message.reply_text(
+        f"✅ Résultat enregistré pour `{api_match_id}` : **{result}**\n"
+        f"🏁 {resolved_count} duel(s) tranché(s) et payé(s).",
+        parse_mode="Markdown",
+    )
+
+
+async def notify_duel_result(context: ContextTypes.DEFAULT_TYPE, outcome: dict):
+    creator_id = outcome["creator_id"]
+    opponent_id = outcome["opponent_id"]
+    creator_score = outcome["creator_score"]
+    opponent_score = outcome["opponent_score"]
+    winner_id = outcome["winner_id"]
+    pot = outcome["pot"]
+
+    for player_id, my_score, other_score in (
+        (creator_id, creator_score, opponent_score),
+        (opponent_id, opponent_score, creator_score),
+    ):
+        if winner_id is None:
+            text = (
+                "🤝 **ÉGALITÉ PARFAITE !** 🤝\n\n"
+                f"`{my_score}` partout ! La cagnotte est partagée : `+{pot / 2}` Coins tombent dans ta poche.\n"
+                "Il faudra un tie-break la prochaine fois... ⚖️"
+            )
+        elif winner_id == player_id:
+            text = (
+                "🏆 **VICTOIRE !** 🏆\n\n"
+                f"`{my_score}` bons pronostics contre `{other_score}` — tu rafles toute la mise !\n"
+                f"💰 `+{pot}` Coins viennent d'atterrir sur ton compte. GG ! 🎉"
+            )
+        else:
+            text = (
+                "💥 **DÉFAITE...** 💥\n\n"
+                f"`{my_score}` contre `{other_score}`, ton adversaire l'emporte cette fois-ci.\n"
+                "La revanche t'attend, ne lâche rien ! 🔁"
+            )
+
+        try:
+            await context.bot.send_message(chat_id=player_id, text=f"⚔️ **RÉSULTAT DU DUEL** ⚔️\n\n{text}", parse_mode="Markdown")
+        except Exception:
+            logging.exception(f"Impossible de notifier {player_id}")
+
+
 async def admin_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     try:
@@ -387,11 +450,20 @@ async def confirm_duel_final(query, context, user_id):
             await query.edit_message_text(f"❌ Erreur : {msg}")
             return
         context.user_data.pop("draft_duel", None)
-        await query.edit_message_text("✅ **Duel accepté et ticket validé !**\n\nBonne chance !", parse_mode="Markdown")
+        await query.edit_message_text(
+            "⚔️ **CHALLENGE ACCEPTÉ !** ⚔️\n\n"
+            "Ton ticket est en jeu, la mise est sur la table. Plus rien à faire qu'attendre le coup de sifflet final...\n"
+            "Que le meilleur pronostiqueur l'emporte ! 🍀",
+            parse_mode="Markdown",
+        )
         try:
             await context.bot.send_message(
                 chat_id=session["creator_id"],
-                text=f"⚔️ **Un adversaire a rejoint votre duel !**\n\nCagnotte engagée : `{session['net_entry_fee'] * 2}` Coins.",
+                text=(
+                    "🚨 **UN ADVERSAIRE EST ENTRÉ SUR LE RING !** 🚨\n\n"
+                    f"Ton duel est officiellement lancé — cagnotte de `{session['net_entry_fee'] * 2}` Coins à la clé.\n"
+                    "Serre les dents, ça commence maintenant ! 🔥"
+                ),
                 parse_mode="Markdown"
             )
         except Exception:
@@ -404,7 +476,13 @@ async def confirm_duel_final(query, context, user_id):
         context.user_data.pop("draft_duel", None)
         bot_username = (await telegram_app.bot.get_me()).username
         share_link = f"https://t.me/{bot_username}?start=join_{session['id']}"
-        text = f"✅ **Duel créé avec succès !**\n\n💰 Mise : `{stake}` Coins\n🎯 Matchs au ticket : `{len(predictions)}`\n\n🔗 **Lien d'invitation :**\n`{share_link}`"
+        text = (
+            "🔥 **DÉFI LANCÉ !** 🔥\n\n"
+            f"💰 Mise sur la table : `{stake}` Coins\n"
+            f"🎯 Ticket verrouillé : `{len(predictions)}` pronostics\n\n"
+            "Trouve un adversaire assez courageux pour relever le défi 👇\n\n"
+            f"🔗 **Lien d'invitation :**\n`{share_link}`"
+        )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📤 Partager le Défi", url=f"https://t.me/share/url?url={share_link}&text=Rejoins-moi%20sur%20ce%20duel%20!")],
             [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
@@ -424,6 +502,7 @@ telegram_app.add_handler(CommandHandler("give", admin_give))
 telegram_app.add_handler(CommandHandler("take", admin_take))
 telegram_app.add_handler(CommandHandler("stats", admin_stats))
 telegram_app.add_handler(CommandHandler("sync", admin_sync))
+telegram_app.add_handler(CommandHandler("resolve", admin_resolve))
 telegram_app.add_handler(CommandHandler("alert", admin_alert))
 telegram_app.add_handler(stake_conv_handler)
 telegram_app.add_handler(CallbackQueryHandler(button_handler))
