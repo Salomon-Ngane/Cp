@@ -13,3 +13,5 @@ services:
         sync: false
       - key: ADMIN_TELEGRAM_ID
         sync: false
+      - key: ODDS_API_KEY
+        sync: false
