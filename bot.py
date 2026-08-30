@@ -369,7 +369,7 @@ async def show_sport_selection_menu(update: Update, context: ContextTypes.DEFAUL
 # ==========================================
 
 async def handle_sport_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche la liste des matchs d'un sport avec leur état de sélection et la barre d'action."""
+    """Gère l'affichage des matchs d'un sport avec la barre de navigation toujours présente."""
     query = update.callback_query
     await query.answer()
 
@@ -422,24 +422,18 @@ async def handle_sport_selection(update: Update, context: ContextTypes.DEFAULT_T
                 InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY"),
             ])
 
-    # --- BARRE DE NAVIGATION EN BAS DU MENU ---
-    navigation_row = []
+    # --- GARANTIE DES BOUTONS DE NAVIGATION ET VALIDATION ---
+    # Bouton de validation (visible si au moins 1 match est choisi, ou si le panier est complet)
+    if selected_count >= 1:
+        keyboard.append([InlineKeyboardButton(f"✅ Voir Récapitulatif ({selected_count}/{target_count})", callback_data="review_ticket")])
 
-    # Le bouton de récapitulatif s'affiche dès que le quota est atteint
-    if selected_count == target_count:
-        keyboard.append([InlineKeyboardButton("✅ Valider & Récapitulatif", callback_data="review_ticket")])
-
-    # Bouton d'annulation et de retour au menu des sports toujours présents
+    # Boutons de retour et d'annulation toujours affichés
     keyboard.append([
-        InlineKeyboardButton("🔙 Menu Sports", callback_data="back_to_sports"),
-        InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")
+        InlineKeyboardButton("🔙 Choisir un autre sport", callback_data="back_to_sports"),
+        InlineKeyboardButton("❌ Annuler le duel", callback_data="cancel_creation")
     ])
 
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def handle_pick_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
