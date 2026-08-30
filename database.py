@@ -1,5 +1,6 @@
 from supabase import create_client, Client
 import config
+import odds_api
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 
@@ -24,6 +25,10 @@ def credit_balance(telegram_id: int, amount: float):
     new_balance = user["coins_balance"] + amount
     supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", telegram_id).execute()
     return new_balance
+
+def get_user_by_id(telegram_id: int):
+    res = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
+    return res.data[0] if res.data else None
 
 # --- MATCHS ---
 
@@ -111,3 +116,50 @@ def save_ticket(session_id: str, user_id: int, predictions: list):
         "status": "PENDING",
     }
     return supabase.table("tickets").insert(ticket_data).execute().data[0]
+
+# --- ADMIN FUNCTIONS ---
+
+def sync_matches_from_api():
+    """Synchronise les matchs depuis TheOddsAPI et met à jour la BD."""
+    try:
+        matches, quota = odds_api.sync_today_matches(config.ODDS_API_KEY)
+        if not matches:
+            return 0, "Aucun match trouvé pour aujourd'hui."
+        
+        # Upsert : insérer ou mettre à jour les matchs
+        for match in matches:
+            try:
+                supabase.table("matches").upsert(match, on_conflict="api_match_id").execute()
+            except Exception:
+                # Si upsert échoue, essayer l'insertion simple
+                try:
+                    supabase.table("matches").insert(match).execute()
+                except Exception:
+                    pass
+        
+        return len(matches), f"✅ {len(matches)} matchs synchronisés. Quota API restant : {quota}"
+    except Exception as e:
+        return 0, f"❌ Erreur lors de la synchronisation : {str(e)}"
+
+def get_matches_status():
+    """Retourne le statut de tous les matchs."""
+    try:
+        response = supabase.table("matches").select("*").execute()
+        matches = response.data
+        
+        status_count = {}
+        for m in matches:
+            status = m.get("status", "UNKNOWN")
+            status_count[status] = status_count.get(status, 0) + 1
+        
+        return status_count, matches
+    except Exception as e:
+        return {}, []
+
+def get_all_users():
+    """Retourne tous les utilisateurs."""
+    try:
+        response = supabase.table("users").select("*").execute()
+        return response.data
+    except Exception:
+        return []
