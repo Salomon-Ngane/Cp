@@ -10,21 +10,20 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
+    ConversationHandler,
     filters,
 )
 import config
 import database
-import odds_api
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 telegram_app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-# Stockage temporaire des états de création (saisie de mise au clavier)
-AWAITING_STAKE_INPUT = {}
+# États pour le ConversationHandler
+WAITING_CUSTOM_STAKE = 1
 
 def _clean_number(raw: str) -> str:
-    """Retire les caractères invisibles que le clavier mobile peut injecter."""
     return re.sub(r"[^\d.]", "", raw)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -36,15 +35,17 @@ def main_menu_keyboard():
         [InlineKeyboardButton("💳 Mon Compte", callback_data="menu_account")],
     ])
 
+def is_admin(user_id: int) -> bool:
+    return user_id == config.ADMIN_TELEGRAM_ID
+
 # ==========================================
-# 1. COMMANDES DE BASE ET INVITATION
+# COMMANDES UTILISATEUR
 # ==========================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
 
-    # Lien direct de défi : /start join_<session_id>
     if args and args[0].startswith("join_"):
         database.get_or_create_user(user.id, user.username or user.first_name)
         session_id = args[0][len("join_"):]
@@ -59,9 +60,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
-
 async def propose_join_duel(message, user_id, session_id, context):
-    """Affiche la proposition d'acceptation d'un duel reçu par lien d'invitation."""
     session = database.get_session(session_id)
     if not session or session["status"] != "WAITING":
         await message.reply_text("❌ Ce duel n'est plus disponible.")
@@ -84,7 +83,66 @@ async def propose_join_duel(message, user_id, session_id, context):
 
 
 # ==========================================
-# 2. GESTION DES BOUTONS DE NAVIGATION
+# COMMANDES ADMINISTRATEUR
+# ==========================================
+
+async def admin_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    try:
+        target_id, amount = int(context.args[0]), int(context.args[1])
+        new_balance = database.credit_balance(target_id, amount)
+        await update.message.reply_text(f"✅ Ajout de {amount} Coins au joueur {target_id}. Nouveau solde : {new_balance}.")
+        await context.bot.send_message(chat_id=target_id, text=f"🏦 **Notification Bancaire :**\nUn administrateur a crédité votre compte de `{amount}` Coins.", parse_mode="Markdown")
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ Usage: /give [telegram_id] [montant]")
+
+async def admin_take(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    try:
+        target_id, amount = int(context.args[0]), int(context.args[1])
+        new_balance = database.credit_balance(target_id, -amount)
+        await update.message.reply_text(f"✅ Retrait de {amount} Coins au joueur {target_id}. Nouveau solde : {new_balance}.")
+        await context.bot.send_message(chat_id=target_id, text=f"🏦 **Notification Bancaire :**\nUn administrateur a retiré `{amount}` Coins de votre compte.", parse_mode="Markdown")
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ Usage: /take [telegram_id] [montant]")
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    stats = database.get_platform_stats()
+    text = (
+        "📊 **Statistiques de la Plateforme**\n\n"
+        f"👥 Utilisateurs totaux : `{stats['total_users']}`\n"
+        f"💰 Coins en circulation : `{stats['total_coins']}`\n"
+        f"⚔️ Duels en attente : `{stats['waiting_duels']}`\n"
+        f"🔥 Duels en cours : `{stats['active_duels']}`"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def admin_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    msg = await update.message.reply_text("⏳ Lancement de la synchronisation TheOddsAPI...")
+    count, result = await database.sync_matches_from_api_async()
+    await msg.edit_text(f"{result}")
+
+async def admin_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    message = " ".join(context.args)
+    if not message:
+        await update.message.reply_text("❌ Usage: /alert [message]")
+        return
+    
+    users = database.get_all_users()
+    sent = 0
+    for u in users:
+        try:
+            await context.bot.send_message(chat_id=u["telegram_id"], text=f"📢 **Annonce Admin :**\n\n{message}", parse_mode="Markdown")
+            sent += 1
+        except Exception:
+            pass
+    await update.message.reply_text(f"✅ Alerte envoyée à {sent} utilisateurs.")
+
+# ==========================================
+# FLUX DE NAVIGATION ET CREATION
 # ==========================================
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,7 +151,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
-    # --- MENU DUEL ---
     if data == "menu_duel":
         text = "⚔️ **MODE DUEL 1v1**\n\nQue souhaitez-vous faire ?"
         keyboard = InlineKeyboardMarkup([
@@ -102,31 +159,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")],
         ])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return ConversationHandler.END
 
-    # --- SELECTION DE LA MISE (AVEC SAISIE LIBRE) ---
     elif data == "duel_create_stake":
-        text = "💰 **Sélectionnez le montant de la mise pour ce Duel :**"
+        text = "💰 **Sélectionnez le montant de la mise :**"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("100 Coins", callback_data="stake_100"), InlineKeyboardButton("500 Coins", callback_data="stake_500")],
             [InlineKeyboardButton("1 000 Coins", callback_data="stake_1000")],
-            [InlineKeyboardButton("✏️ Montant personnalisé (Saisie libre)", callback_data="stake_custom")],
+            [InlineKeyboardButton("✏️ Montant personnalisé", callback_data="stake_custom")],
             [InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")]
         ])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return ConversationHandler.END
 
-    elif data == "stake_custom":
-        AWAITING_STAKE_INPUT[user_id] = True
-        await query.edit_message_text(
-            "✏️ **Entrez le montant de votre mise au clavier :**\n\n(Exemple: Tapez `250` puis envoyez le message)",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Annuler", callback_data="duel_create_stake")]]),
-            parse_mode="Markdown"
-        )
-
-    elif data.startswith("stake_"):
-        stake = float(_clean_number(data.split("_")[1]))
+    elif data.startswith("stake_") and data != "stake_custom":
+        stake = int(_clean_number(data.split("_")[1]))
         await init_draft_duel(query, context, user_id, stake)
+        return ConversationHandler.END
 
-    # --- LISTE DES DUELS PUBLICS ---
     elif data == "duel_list_public":
         duels = database.get_open_duels(exclude_creator_id=user_id)
         if not duels:
@@ -134,42 +184,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📭 Aucun duel ouvert pour le moment. Créez le vôtre !",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")]]),
             )
-            return
-        keyboard = [
-            [InlineKeyboardButton(f"⚔️ Duel — {d['gross_entry_fee']} Coins ({d['match_count']} matchs)", callback_data=f"start_join_{d['id']}")]
-            for d in duels
-        ]
+            return ConversationHandler.END
+        keyboard = [[InlineKeyboardButton(f"⚔️ Duel — {d['gross_entry_fee']} Coins ({d['match_count']} matchs)", callback_data=f"start_join_{d['id']}")] for d in duels]
         keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")])
         await query.edit_message_text("🔍 **Duels ouverts :**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return ConversationHandler.END
 
-    # --- DÉMARRER LA COMPOSITION POUR UN JOUEUR 2 ---
     elif data.startswith("start_join_"):
         session_id = data[len("start_join_"):]
         session = database.get_session(session_id)
         if not session or session["status"] != "WAITING":
             await query.edit_message_text("❌ Ce duel n'est plus disponible.")
-            return
+            return ConversationHandler.END
 
         db_user = database.get_or_create_user(user_id, "")
         if db_user["coins_balance"] < session["gross_entry_fee"]:
             await query.edit_message_text(
                 f"❌ **Solde insuffisant !**\n\nIl vous faut `{session['gross_entry_fee']}` Coins.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]]),
-                parse_mode="Markdown"
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]]), parse_mode="Markdown"
             )
-            return
+            return ConversationHandler.END
 
-        context.user_data["draft_duel"] = {
-            "mode": "join",
-            "session_id": session_id,
-            "stake": session["gross_entry_fee"],
-            "match_count": session["match_count"],
-            "selected_matches": {}
-        }
+        context.user_data["draft_duel"] = {"mode": "join", "session_id": session_id, "stake": session["gross_entry_fee"], "match_count": session["match_count"], "selected_matches": {}}
         await show_sport_selection_menu(query, context)
+        return ConversationHandler.END
 
-    # --- SELECTION DE SPORT ET PRONOSTICS ---
-    elif data == "select_sports" or data == "back_to_sports":
+    elif data in ["select_sports", "back_to_sports"]:
         await show_sport_selection_menu(query, context)
 
     elif data.startswith("sport_"):
@@ -177,7 +217,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_matches_for_sport(query, context, sport)
 
     elif data.startswith("pick_"):
-        # Format: pick_<match_id>_<PICK>
         _, m_id, pick = data.split("_")
         draft = context.user_data.get("draft_duel", {})
         selected = draft.get("selected_matches", {})
@@ -187,12 +226,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if match_obj:
             if m_id in selected and selected[m_id]["pick"] == pick:
-                del selected[m_id]  # Décoche si on reclique
+                del selected[m_id]
             else:
                 selected[m_id] = {"match": match_obj, "pick": pick}
-
-        sport = draft.get("current_sport", "soccer")
-        await show_matches_for_sport(query, context, sport)
+        await show_matches_for_sport(query, context, draft.get("current_sport", "soccer"))
 
     elif data == "review_ticket":
         await show_ticket_review(query, context)
@@ -203,71 +240,80 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "cancel_creation":
         context.user_data.pop("draft_duel", None)
         await query.edit_message_text("❌ Création annulée.", reply_markup=main_menu_keyboard())
+        return ConversationHandler.END
 
     elif data == "menu_main":
-        AWAITING_STAKE_INPUT.pop(user_id, None)
         db_user = database.get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
         text = f"👋 Bienvenue dans le Bot Duel Sports !\n\n💰 **Votre Solde :** `{db_user['coins_balance']}` Coins"
         await query.edit_message_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+        return ConversationHandler.END
+
+    elif data == "menu_account":
+        db_user = database.get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
+        text = f"💳 **Mon Compte**\n\n👤 Utilisateur : {db_user['username']}\n💰 Solde : `{db_user['coins_balance']}` Coins"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]]), parse_mode="Markdown")
+
 
 # ==========================================
-# 3. GESTION DU REPERTOIRE ET PANIER MULTI-SPORTS
+# CONVERSATION HANDLER (MISE CUSTOM)
 # ==========================================
 
-async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Intercepte les saisies de montant au clavier."""
+async def ask_custom_stake(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "✏️ **Entrez le montant de votre mise au clavier (en entier) :**\n\n(Exemple: Tapez `250` puis envoyez)",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Annuler", callback_data="duel_create_stake")]]),
+        parse_mode="Markdown"
+    )
+    return WAITING_CUSTOM_STAKE
+
+async def receive_custom_stake(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if AWAITING_STAKE_INPUT.get(user_id):
-        text = update.message.text.strip()
-        try:
-            stake = float(_clean_number(text))
-            if stake <= 0:
-                raise ValueError()
-            AWAITING_STAKE_INPUT.pop(user_id, None)
-            
-            # Message temporaire pour lancer le menu
-            dummy_msg = await update.message.reply_text("⏳ Validation du montant...")
-            
-            # Injection dans le flux de création
-            class DummyQuery:
-                def __init__(self, message):
-                    self.message = message
-                async def edit_message_text(self, text, reply_markup=None, parse_mode=None):
-                    return await self.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    text = update.message.text.strip()
+    try:
+        stake = int(_clean_number(text))
+        if stake <= 0: raise ValueError()
+        
+        dummy_msg = await update.message.reply_text("⏳ Validation du montant...")
+        class DummyQuery:
+            def __init__(self, message): self.message = message
+            async def edit_message_text(self, text, reply_markup=None, parse_mode=None):
+                return await self.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
-            await init_draft_duel(DummyQuery(dummy_msg), context, user_id, stake)
-        except ValueError:
-            await update.message.reply_text("❌ Montant invalide. Veuillez entrer un nombre positif.")
+        await init_draft_duel(DummyQuery(dummy_msg), context, user_id, stake)
+        return ConversationHandler.END
+    except ValueError:
+        await update.message.reply_text("❌ Montant invalide. Veuillez entrer un nombre entier positif.")
+        return WAITING_CUSTOM_STAKE
 
+async def cancel_custom_stake(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await button_handler(update, context)
+    return ConversationHandler.END
 
-async def init_draft_duel(query_or_dummy, context, user_id, stake):
+# ==========================================
+# FONCTIONS UTILITAIRES TICKET
+# ==========================================
+
+async def init_draft_duel(query, context, user_id, stake):
     db_user = database.get_or_create_user(user_id, "")
     if db_user["coins_balance"] < stake:
-        await query_or_dummy.edit_message_text(
+        await query.edit_message_text(
             f"❌ **Solde insuffisant !**\n\nVotre solde : `{db_user['coins_balance']}` Coins.\nMise requise : `{stake}` Coins.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Modifier la mise", callback_data="duel_create_stake")]]),
-            parse_mode="Markdown"
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Modifier la mise", callback_data="duel_create_stake")]]), parse_mode="Markdown"
         )
         return
 
-    # Taille dynamique : pas de limite fixée à l'avance
-    context.user_data["draft_duel"] = {
-        "mode": "create",
-        "stake": stake,
-        "selected_matches": {}
-    }
-    await show_sport_selection_menu(query_or_dummy, context)
-
+    context.user_data["draft_duel"] = {"mode": "create", "stake": stake, "selected_matches": {}}
+    await show_sport_selection_menu(query, context)
 
 async def show_sport_selection_menu(query, context):
     draft = context.user_data.get("draft_duel", {})
     selected = draft.get("selected_matches", {})
-
     text = (
         f"🏟️ **Sélection de Sport pour votre Ticket**\n\n"
         f"💰 **Mise :** `{draft.get('stake', 100)}` Coins\n"
-        f"🎯 **Matchs sélectionnés :** `{len(selected)}` match(s)\n\n"
-        "Choisissez une discipline pour ajouter des matchs :"
+        f"🎯 **Matchs sélectionnés :** `{len(selected)}` match(s)\n\nChoisissez une discipline :"
     )
     keyboard = [
         [InlineKeyboardButton("⚽ Football", callback_data="sport_soccer"), InlineKeyboardButton("🏀 Basketball", callback_data="sport_basketball")],
@@ -276,57 +322,36 @@ async def show_sport_selection_menu(query, context):
     if len(selected) >= 1:
         keyboard.append([InlineKeyboardButton(f"✅ Voir / Valider mon Ticket ({len(selected)} match(s))", callback_data="review_ticket")])
     keyboard.append([InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
-
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
 
 async def show_matches_for_sport(query, context, sport):
     draft = context.user_data.get("draft_duel", {})
     draft["current_sport"] = sport
     selected = draft.get("selected_matches", {})
-
     matches = database.get_matches_by_sport(sport)
     keyboard = []
 
     if not matches:
-        text = f"❌ Aucun match disponible pour la discipline **{sport}**."
+        text = f"❌ Aucun match disponible pour **{sport}**."
     else:
-        text = (
-            f"🏟️ **Matchs — {sport.upper()}**\n"
-            f"📊 Matchs actuellement au panier : **{len(selected)}**\n\n"
-        )
+        text = f"🏟️ **Matchs — {sport.upper()}**\n📊 Matchs actuellement au panier : **{len(selected)}**\n\n"
         for m in matches:
             m_id = str(m["api_match_id"])
             current_pick = selected[m_id]["pick"] if m_id in selected else None
-
             btn_h = f"1 ({m.get('odds_home', 1.0)})" + (" ✅" if current_pick == "HOME" else "")
             btn_a = f"2 ({m.get('odds_away', 1.0)})" + (" ✅" if current_pick == "AWAY" else "")
-
-            keyboard.append([InlineKeyboardButton(f"🏟️ {m['home_team']} vs {m['away_team']}", callback_data="ignore")])
             
+            keyboard.append([InlineKeyboardButton(f"🏟️ {m['home_team']} vs {m['away_team']}", callback_data="ignore")])
             if m.get("odds_draw"):
                 btn_d = f"N ({m.get('odds_draw')})" + (" ✅" if current_pick == "DRAW" else "")
-                keyboard.append([
-                    InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
-                    InlineKeyboardButton(btn_d, callback_data=f"pick_{m_id}_DRAW"),
-                    InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY"),
-                ])
+                keyboard.append([InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"), InlineKeyboardButton(btn_d, callback_data=f"pick_{m_id}_DRAW"), InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY")])
             else:
-                keyboard.append([
-                    InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
-                    InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY"),
-                ])
+                keyboard.append([InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"), InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY")])
 
     if len(selected) >= 1:
         keyboard.append([InlineKeyboardButton(f"✅ Voir Récapitulatif ({len(selected)} match(s))", callback_data="review_ticket")])
-    
-    keyboard.append([
-        InlineKeyboardButton("🔙 Changer de Sport", callback_data="back_to_sports"),
-        InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")
-    ])
-
+    keyboard.append([InlineKeyboardButton("🔙 Changer de Sport", callback_data="back_to_sports"), InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
 
 async def show_ticket_review(query, context):
     draft = context.user_data.get("draft_duel", {})
@@ -334,12 +359,7 @@ async def show_ticket_review(query, context):
     stake = draft.get("stake", 100)
     total_count = len(selected)
 
-    text = (
-        f"📋 **Récapitulatif de votre Ticket**\n\n"
-        f"💰 **Mise engagée :** `{stake}` Coins\n"
-        f"🎯 **Nombre de matchs retenus :** `{total_count}`\n\n"
-        "--- **Vos Choix** ---\n"
-    )
+    text = f"📋 **Récapitulatif de votre Ticket**\n\n💰 **Mise engagée :** `{stake}` Coins\n🎯 **Matchs retenus :** `{total_count}`\n\n--- **Vos Choix** ---\n"
     for m_id, item in selected.items():
         m = item["match"]
         pick = item["pick"]
@@ -351,31 +371,21 @@ async def show_ticket_review(query, context):
         keyboard.append([InlineKeyboardButton(f"🚀 Valider le Duel ({total_count} match(s))", callback_data="confirm_duel_creation")])
     else:
         text += "\n⚠️ *Veuillez choisir au moins 1 match pour valider votre ticket.*"
-
-    keyboard.append([InlineKeyboardButton("➕ Ajouter d'autres matchs", callback_data="back_to_sports")])
-    keyboard.append([InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
-
+    keyboard.append([InlineKeyboardButton("➕ Ajouter d'autres matchs", callback_data="back_to_sports"), InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
 
 async def confirm_duel_final(query, context, user_id):
     draft = context.user_data.get("draft_duel", {})
     mode = draft.get("mode", "create")
     stake = draft.get("stake", 100)
     selected = draft.get("selected_matches", {})
-    
-    predictions = [
-        {"match_id": m_id, "pick": item["pick"]}
-        for m_id, item in selected.items()
-    ]
+    predictions = [{"match_id": m_id, "pick": item["pick"]} for m_id, item in selected.items()]
 
     if mode == "join":
-        session_id = draft["session_id"]
-        session, msg = database.join_duel_session(session_id, user_id, predictions)
+        session, msg = database.join_duel_session(draft["session_id"], user_id, predictions)
         if not session:
             await query.edit_message_text(f"❌ Erreur : {msg}")
             return
-        
         context.user_data.pop("draft_duel", None)
         await query.edit_message_text("✅ **Duel accepté et ticket validé !**\n\nBonne chance !", parse_mode="Markdown")
         try:
@@ -387,22 +397,14 @@ async def confirm_duel_final(query, context, user_id):
         except Exception:
             pass
     else:
-        # Création de session
         session, msg = database.create_duel_session(user_id, stake, len(predictions), predictions)
         if not session:
             await query.edit_message_text(f"❌ Erreur : {msg}")
             return
-
         context.user_data.pop("draft_duel", None)
         bot_username = (await telegram_app.bot.get_me()).username
         share_link = f"https://t.me/{bot_username}?start=join_{session['id']}"
-
-        text = (
-            "✅ **Duel créé avec succès !**\n\n"
-            f"💰 Mise : `{stake}` Coins\n"
-            f"🎯 Matchs au ticket : `{len(predictions)}`\n\n"
-            f"🔗 **Lien d'invitation :**\n`{share_link}`"
-        )
+        text = f"✅ **Duel créé avec succès !**\n\n💰 Mise : `{stake}` Coins\n🎯 Matchs au ticket : `{len(predictions)}`\n\n🔗 **Lien d'invitation :**\n`{share_link}`"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📤 Partager le Défi", url=f"https://t.me/share/url?url={share_link}&text=Rejoins-moi%20sur%20ce%20duel%20!")],
             [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
@@ -411,9 +413,20 @@ async def confirm_duel_final(query, context, user_id):
 
 
 # --- ENREGISTREMENT DES HANDLERS ---
+stake_conv_handler = ConversationHandler(
+    entry_points=[CallbackQueryHandler(ask_custom_stake, pattern="^stake_custom$")],
+    states={WAITING_CUSTOM_STAKE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_custom_stake)]},
+    fallbacks=[CallbackQueryHandler(cancel_custom_stake, pattern="^duel_create_stake$")]
+)
+
 telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("give", admin_give))
+telegram_app.add_handler(CommandHandler("take", admin_take))
+telegram_app.add_handler(CommandHandler("stats", admin_stats))
+telegram_app.add_handler(CommandHandler("sync", admin_sync))
+telegram_app.add_handler(CommandHandler("alert", admin_alert))
+telegram_app.add_handler(stake_conv_handler)
 telegram_app.add_handler(CallbackQueryHandler(button_handler))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
 telegram_app.add_error_handler(error_handler)
 
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
