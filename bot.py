@@ -20,7 +20,6 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 telegram_app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-# États pour le ConversationHandler
 WAITING_CUSTOM_STAKE = 1
 
 def _clean_number(raw: str) -> str:
@@ -54,9 +53,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db_user = database.get_or_create_user(user.id, user.username or user.first_name)
     text = (
-        f"👋 Bienvenue **{user.first_name}** dans le Bot Duel Sports !\n\n"
+        f"👋 Bienvenue **{user.first_name}** sur **Clashsport** !\n\n"
         f"💰 **Votre Solde :** `{db_user['coins_balance']}` Coins\n\n"
-        "Choisissez une option ci-dessous :"
+        "L'arène ultime de pronostics sportifs en duel 1v1. Choisissez une option ci-dessous :"
     )
     await update.message.reply_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
@@ -70,7 +69,7 @@ async def propose_join_duel(message, user_id, session_id, context):
         return
 
     text = (
-        "⚔️ **Invitation à un Duel !**\n\n"
+        "⚔️ **Invitation à un Duel Clashsport !**\n\n"
         f"💰 **Mise requise :** `{session['gross_entry_fee']}` Coins\n"
         f"🎯 **Condition :** Composer un ticket autonome de `{session['match_count']}` match(s).\n\n"
         "Voulez-vous accepter et composer votre ticket ?"
@@ -140,11 +139,11 @@ async def notify_duel_result(context: ContextTypes.DEFAULT_TYPE, outcome: dict):
             text = (
                 "💥 **DÉFAITE...** 💥\n\n"
                 f"`{my_score}` contre `{other_score}`, ton adversaire l'emporte cette fois-ci.\n"
-                "La revanche t'attend, ne lâche rien ! 🔁"
+                "La revanche t'attend sur Clashsport, ne lâche rien ! 🔁"
             )
 
         try:
-            await context.bot.send_message(chat_id=player_id, text=f"⚔️ **RÉSULTAT DU DUEL** ⚔️\n\n{text}", parse_mode="Markdown")
+            await context.bot.send_message(chat_id=player_id, text=f"⚔️ **RÉSULTAT DU DUEL CLASHSPORT** ⚔️\n\n{text}", parse_mode="Markdown")
         except Exception:
             logging.exception(f"Impossible de notifier {player_id}")
 
@@ -155,7 +154,7 @@ async def admin_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id, amount = int(context.args[0]), int(context.args[1])
         new_balance = database.credit_balance(target_id, amount)
         await update.message.reply_text(f"✅ Ajout de {amount} Coins au joueur {target_id}. Nouveau solde : {new_balance}.")
-        await context.bot.send_message(chat_id=target_id, text=f"🏦 **Notification Bancaire :**\nUn administrateur a crédité votre compte de `{amount}` Coins.", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=target_id, text=f"🏦 **Notification Clashsport :**\nUn administrateur a crédité votre compte de `{amount}` Coins.", parse_mode="Markdown")
     except (IndexError, ValueError):
         await update.message.reply_text("❌ Usage: /give [telegram_id] [montant]")
 
@@ -165,7 +164,7 @@ async def admin_take(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id, amount = int(context.args[0]), int(context.args[1])
         new_balance = database.credit_balance(target_id, -amount)
         await update.message.reply_text(f"✅ Retrait de {amount} Coins au joueur {target_id}. Nouveau solde : {new_balance}.")
-        await context.bot.send_message(chat_id=target_id, text=f"🏦 **Notification Bancaire :**\nUn administrateur a retiré `{amount}` Coins de votre compte.", parse_mode="Markdown")
+        await context.bot.send_message(chat_id=target_id, text=f"🏦 **Notification Clashsport :**\nUn administrateur a retiré `{amount}` Coins de votre compte.", parse_mode="Markdown")
     except (IndexError, ValueError):
         await update.message.reply_text("❌ Usage: /take [telegram_id] [montant]")
 
@@ -173,7 +172,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     stats = database.get_platform_stats()
     text = (
-        "📊 **Statistiques de la Plateforme**\n\n"
+        "📊 **Statistiques Clashsport**\n\n"
         f"👥 Utilisateurs totaux : `{stats['total_users']}`\n"
         f"💰 Coins en circulation : `{stats['total_coins']}`\n"
         f"⚔️ Duels en attente : `{stats['waiting_duels']}`\n"
@@ -198,7 +197,7 @@ async def admin_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sent = 0
     for u in users:
         try:
-            await context.bot.send_message(chat_id=u["telegram_id"], text=f"📢 **Annonce Admin :**\n\n{message}", parse_mode="Markdown")
+            await context.bot.send_message(chat_id=u["telegram_id"], text=f"📢 **Annonce Clashsport :**\n\n{message}", parse_mode="Markdown")
             sent += 1
         except Exception:
             pass
@@ -215,7 +214,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "menu_duel":
-        text = "⚔️ **MODE DUEL 1v1**\n\nQue souhaitez-vous faire ?"
+        text = "⚔️ **MODE DUEL 1v1 — CLASHSPORT**\n\nQue souhaitez-vous faire ?"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Créer un nouveau Duel", callback_data="duel_create_stake")],
             [InlineKeyboardButton("🔍 Liste des Duels Ouverts", callback_data="duel_list_public")],
@@ -250,7 +249,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
         keyboard = [[InlineKeyboardButton(f"⚔️ Duel — {d['gross_entry_fee']} Coins ({d['match_count']} matchs)", callback_data=f"start_join_{d['id']}")] for d in duels]
         keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")])
-        await query.edit_message_text("🔍 **Duels ouverts :**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await query.edit_message_text("🔍 **Duels ouverts sur Clashsport :**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         return ConversationHandler.END
 
     elif data.startswith("start_join_"):
@@ -311,14 +310,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "menu_main":
         db_user = database.get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
-        text = f"👋 Bienvenue dans le Bot Duel Sports !\n\n💰 **Votre Solde :** `{db_user['coins_balance']}` Coins"
+        text = f"👋 Bienvenue sur **Clashsport** !\n\n💰 **Votre Solde :** `{db_user['coins_balance']}` Coins"
         await query.edit_message_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
         return ConversationHandler.END
 
     elif data == "menu_account":
         db_user = database.get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
-        text = f"💳 **Mon Compte**\n\n👤 Utilisateur : {db_user['username']}\n💰 Solde : `{db_user['coins_balance']}` Coins"
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]]), parse_mode="Markdown")
+        text = (
+            f"💳 **Mon Compte — Clashsport**\n\n"
+            f"👤 Utilisateur : {db_user['username']}\n"
+            f"🆔 ID Telegram : `{db_user['telegram_id']}`\n"
+            f"💰 Solde : `{db_user['coins_balance']}` Coins\n\n"
+            "Pour recharger vos Coins ou demander de l'aide, contactez notre support ci-dessous."
+        )
+        # N'OUBLIEZ PAS de remplacer 'votre_username_admin' dans config par votre vrai username Telegram
+        admin_url = f"https://t.me/{getattr(config, 'ADMIN_USERNAME', 'votre_username_admin')}"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Support / Recharger mes Coins", url=admin_url)],
+            [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 # ==========================================
@@ -378,7 +389,7 @@ async def show_sport_selection_menu(query, context):
     draft = context.user_data.get("draft_duel", {})
     selected = draft.get("selected_matches", {})
     text = (
-        f"🏟️ **Sélection de Sport pour votre Ticket**\n\n"
+        f"🏟️ **Sélection de Sport pour votre Ticket Clashsport**\n\n"
         f"💰 **Mise :** `{draft.get('stake', 100)}` Coins\n"
         f"🎯 **Matchs sélectionnés :** `{len(selected)}` match(s)\n\nChoisissez une discipline :"
     )
@@ -459,7 +470,7 @@ async def show_ticket_review(query, context):
     stake = draft.get("stake", 100)
     total_count = len(selected)
 
-    text = f"📋 **Récapitulatif de votre Ticket**\n\n💰 **Mise engagée :** `{stake}` Coins\n🎯 **Matchs retenus :** `{total_count}`\n\n--- **Vos Choix** ---\n"
+    text = f"📋 **Récapitulatif de votre Ticket Clashsport**\n\n💰 **Mise engagée :** `{stake}` Coins\n🎯 **Matchs retenus :** `{total_count}`\n\n--- **Vos Choix** ---\n"
     for m_id, item in selected.items():
         m = item["match"]
         pick = item["pick"]
@@ -488,7 +499,7 @@ async def confirm_duel_final(query, context, user_id):
             return
         context.user_data.pop("draft_duel", None)
         await query.edit_message_text(
-            "⚔️ **CHALLENGE ACCEPTÉ !** ⚔️\n\n"
+            "⚔️ **CHALLENGE ACCEPTÉ SUR CLASHSPORT !** ⚔️\n\n"
             "Ton ticket est en jeu, la mise est sur la table. Plus rien à faire qu'attendre le coup de sifflet final...\n"
             "Que le meilleur pronostiqueur l'emporte ! 🍀",
             parse_mode="Markdown",
@@ -497,7 +508,7 @@ async def confirm_duel_final(query, context, user_id):
             await context.bot.send_message(
                 chat_id=session["creator_id"],
                 text=(
-                    "🚨 **UN ADVERSAIRE EST ENTRÉ SUR LE RING !** 🚨\n\n"
+                    "🚨 **UN ADVERSAIRE EST ENTRÉ SUR LE RING CLASHSPORT !** 🚨\n\n"
                     f"Ton duel est officiellement lancé — cagnotte de `{session['net_entry_fee'] * 2}` Coins à la clé.\n"
                     "Serre les dents, ça commence maintenant ! 🔥"
                 ),
@@ -514,14 +525,14 @@ async def confirm_duel_final(query, context, user_id):
         bot_username = (await telegram_app.bot.get_me()).username
         share_link = f"https://t.me/{bot_username}?start=join_{session['id']}"
         text = (
-            "🔥 **DÉFI LANCÉ !** 🔥\n\n"
+            "🔥 **DÉFI LANCÉ SUR CLASHSPORT !** 🔥\n\n"
             f"💰 Mise sur la table : `{stake}` Coins\n"
             f"🎯 Ticket verrouillé : `{len(predictions)}` pronostics\n\n"
             "Trouve un adversaire assez courageux pour relever le défi 👇\n\n"
             f"🔗 **Lien d'invitation :**\n`{share_link}`"
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📤 Partager le Défi", url=f"https://t.me/share/url?url={share_link}&text=Rejoins-moi%20sur%20ce%20duel%20!")],
+            [InlineKeyboardButton("📤 Partager le Défi", url=f"https://t.me/share/url?url={share_link}&text=Rejoins-moi%20sur%20ce%20duel%20Clashsport%20!")],
             [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
         ])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
