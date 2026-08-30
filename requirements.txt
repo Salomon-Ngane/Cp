@@ -2,5 +2,5 @@ python-telegram-bot>=20.0
 supabase
 fastapi
 uvicorn
-requests
+httpx
 python-dotenv
