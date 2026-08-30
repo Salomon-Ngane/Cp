@@ -14,21 +14,41 @@ def get_or_create_user(telegram_id: int, username: str, referred_by: int = None)
     new_user = {
         "telegram_id": telegram_id,
         "username": username,
-        "coins_balance": 1000,  # Solde offert pour tester
+        "coins_balance": 1000,
         "referred_by": referred_by,
     }
     insert_res = supabase.table("users").insert(new_user).execute()
     return insert_res.data[0]
 
-def credit_balance(telegram_id: int, amount: float):
+def credit_balance(telegram_id: int, amount: int):
     user = get_or_create_user(telegram_id, "")
-    new_balance = user["coins_balance"] + amount
+    new_balance = int(user["coins_balance"]) + amount
     supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", telegram_id).execute()
     return new_balance
 
 def get_user_by_id(telegram_id: int):
     res = supabase.table("users").select("*").eq("telegram_id", telegram_id).execute()
     return res.data[0] if res.data else None
+
+def get_all_users():
+    try:
+        response = supabase.table("users").select("*").execute()
+        return response.data
+    except Exception:
+        return []
+
+def get_platform_stats():
+    users = get_all_users()
+    sessions = supabase.table("sessions").select("*").execute().data
+    total_coins = sum(u.get("coins_balance", 0) for u in users)
+    waiting_duels = len([s for s in sessions if s.get("status") == "WAITING"])
+    active_duels = len([s for s in sessions if s.get("status") == "IN_PROGRESS"])
+    return {
+        "total_users": len(users),
+        "total_coins": total_coins,
+        "waiting_duels": waiting_duels,
+        "active_duels": active_duels
+    }
 
 # --- MATCHS ---
 
@@ -52,16 +72,15 @@ def get_open_duels(exclude_creator_id: int = None):
 
 # --- DUELS ET TICKETS ---
 
-def create_duel_session(creator_id: int, gross_fee: float, match_count: int, predictions: list):
+def create_duel_session(creator_id: int, gross_fee: int, match_count: int, predictions: list):
     user = get_or_create_user(creator_id, "")
     if user["coins_balance"] < gross_fee:
         return None, "Solde insuffisant"
 
-    rake = gross_fee * config.RAKE_PERCENTAGE
+    rake = int(round(gross_fee * config.RAKE_PERCENTAGE))
     net_fee = gross_fee - rake
 
-    # Débit du solde
-    supabase.table("users").update({"coins_balance": user["coins_balance"] - gross_fee}).eq("telegram_id", creator_id).execute()
+    supabase.table("users").update({"coins_balance": int(user["coins_balance"]) - gross_fee}).eq("telegram_id", creator_id).execute()
 
     session_data = {
         "creator_id": creator_id,
@@ -72,25 +91,21 @@ def create_duel_session(creator_id: int, gross_fee: float, match_count: int, pre
         "status": "WAITING"
     }
     session = supabase.table("sessions").insert(session_data).execute().data[0]
-    
-    # Enregistrement du ticket indépendant
     save_ticket(session["id"], creator_id, predictions)
     return session, "Succès"
-
 
 def join_duel_session(session_id: str, joiner_id: int, predictions: list):
     session = get_session(session_id)
     if not session or session["status"] != "WAITING":
         return None, "Session fermée ou indisponible."
 
-    gross_fee = session["gross_entry_fee"]
+    gross_fee = int(session["gross_entry_fee"])
     joiner = get_or_create_user(joiner_id, "")
+    
     if joiner["coins_balance"] < gross_fee:
         return None, "Solde insuffisant."
 
-    # Débit
-    supabase.table("users").update({"coins_balance": joiner["coins_balance"] - gross_fee}).eq("telegram_id", joiner_id).execute()
-
+    # 1. Verrouillage optimiste de la session d'abord, pour éviter les courses
     updated = (
         supabase.table("sessions")
         .update({"opponent_id": joiner_id, "status": "IN_PROGRESS"})
@@ -100,13 +115,12 @@ def join_duel_session(session_id: str, joiner_id: int, predictions: list):
     )
 
     if not updated.data:
-        # Remboursement en cas d'accès concurrent
-        supabase.table("users").update({"coins_balance": joiner["coins_balance"]}).eq("telegram_id", joiner_id).execute()
-        return None, "Un autre joueur vous a devancé."
+        return None, "Un autre joueur a déjà rejoint ce duel !"
 
+    # 2. Une fois la session acquise, on débite
+    supabase.table("users").update({"coins_balance": int(joiner["coins_balance"]) - gross_fee}).eq("telegram_id", joiner_id).execute()
     save_ticket(session_id, joiner_id, predictions)
     return updated.data[0], "Succès"
-
 
 def save_ticket(session_id: str, user_id: int, predictions: list):
     ticket_data = {
@@ -119,19 +133,16 @@ def save_ticket(session_id: str, user_id: int, predictions: list):
 
 # --- ADMIN FUNCTIONS ---
 
-def sync_matches_from_api():
-    """Synchronise les matchs depuis TheOddsAPI et met à jour la BD."""
+async def sync_matches_from_api_async():
     try:
-        matches, quota = odds_api.sync_today_matches(config.ODDS_API_KEY)
+        matches, quota = await odds_api.sync_today_matches(config.ODDS_API_KEY)
         if not matches:
             return 0, "Aucun match trouvé pour aujourd'hui."
         
-        # Upsert : insérer ou mettre à jour les matchs
         for match in matches:
             try:
                 supabase.table("matches").upsert(match, on_conflict="api_match_id").execute()
             except Exception:
-                # Si upsert échoue, essayer l'insertion simple
                 try:
                     supabase.table("matches").insert(match).execute()
                 except Exception:
@@ -140,26 +151,3 @@ def sync_matches_from_api():
         return len(matches), f"✅ {len(matches)} matchs synchronisés. Quota API restant : {quota}"
     except Exception as e:
         return 0, f"❌ Erreur lors de la synchronisation : {str(e)}"
-
-def get_matches_status():
-    """Retourne le statut de tous les matchs."""
-    try:
-        response = supabase.table("matches").select("*").execute()
-        matches = response.data
-        
-        status_count = {}
-        for m in matches:
-            status = m.get("status", "UNKNOWN")
-            status_count[status] = status_count.get(status, 0) + 1
-        
-        return status_count, matches
-    except Exception as e:
-        return {}, []
-
-def get_all_users():
-    """Retourne tous les utilisateurs."""
-    try:
-        response = supabase.table("users").select("*").execute()
-        return response.data
-    except Exception:
-        return []
