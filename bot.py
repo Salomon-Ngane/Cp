@@ -569,7 +569,9 @@ async def confirm_duel_creation(update: Update, context: ContextTypes.DEFAULT_TY
     # 1. Vérification du solde utilisateur
     if user.get("coins_balance", 0) < stake:
         await query.edit_message_text(
-            f"❌ Solde insuffisant ! Vous avez **{user.get('coins_balance', 0)} Coins** mais la mise est de **{stake} Coins}.",
+            # Assurez-vous que les accolades et guillemets sont bien appairés :
+f"❌ Solde insuffisant ! Vous avez **{user.get('coins_balance', 0)} Coins** mais la mise est de **{stake} Coins}."
+
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour au récapitulatif", callback_data="review_ticket")]])
         )
         return
