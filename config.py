@@ -8,6 +8,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+CELEBRATION_STICKER_ID = os.getenv("CELEBRATION_STICKER_ID")  # optionnel, voir instructions
 
 # Paramètres de l'Économie
 RAKE_PERCENTAGE = 0.10  # 10% de frais de participation
