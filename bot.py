@@ -31,6 +31,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⚔️ Créer / Rejoindre un Duel", callback_data="menu_duel")],
+        [InlineKeyboardButton("📋 Mes Tickets", callback_data="my_tickets"), InlineKeyboardButton("🔴 Live", callback_data="live_all")],
         [InlineKeyboardButton("💳 Mon Compte", callback_data="menu_account")],
     ])
 
@@ -143,9 +144,149 @@ async def notify_duel_result(context: ContextTypes.DEFAULT_TYPE, outcome: dict):
             )
 
         try:
-            await context.bot.send_message(chat_id=player_id, text=f"⚔️ **RÉSULTAT DU DUEL CLASHSPORT** ⚔️\n\n{text}", parse_mode="Markdown")
+            sent = await context.bot.send_message(chat_id=player_id, text=f"⚔️ **RÉSULTAT DU DUEL CLASHSPORT** ⚔️\n\n{text}", parse_mode="Markdown")
+            if winner_id == player_id:
+                try:
+                    await context.bot.set_message_reaction(chat_id=player_id, message_id=sent.message_id, reaction="🔥")
+                except Exception:
+                    pass
+                if config.CELEBRATION_STICKER_ID:
+                    try:
+                        await context.bot.send_sticker(chat_id=player_id, sticker=config.CELEBRATION_STICKER_ID)
+                    except Exception:
+                        pass
         except Exception:
             logging.exception(f"Impossible de notifier {player_id}")
+
+
+async def tickets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    sessions = database.get_user_sessions(user_id)
+    if not sessions:
+        await update.message.reply_text("📭 Aucun ticket pour l'instant. Lance ton premier duel avec /start !")
+        return
+    await update.message.reply_text("📋 **Tes Tickets Clashsport**", reply_markup=_tickets_keyboard(sessions, user_id), parse_mode="Markdown")
+
+
+def _tickets_keyboard(sessions, user_id):
+    keyboard = []
+    for s in sessions:
+        if s["status"] == "WAITING":
+            icon = "⏳"
+        elif s["status"] == "IN_PROGRESS":
+            icon = "🔴"
+        elif s.get("winner_id") == user_id:
+            icon = "🏆"
+        elif s.get("winner_id"):
+            icon = "💀"
+        else:
+            icon = "🤝"
+        keyboard.append([InlineKeyboardButton(f"{icon} Duel — {s['gross_entry_fee']} Coins ({s['match_count']} matchs)", callback_data=f"ticket_{s['id']}")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def show_ticket_detail(query, context, session_id):
+    user_id = query.from_user.id
+    session = database.get_session(session_id)
+    if not session:
+        await query.edit_message_text("❌ Duel introuvable.")
+        return
+
+    opponent_id = session["opponent_id"] if session["creator_id"] == user_id else session["creator_id"]
+    tickets = database.get_tickets_for_session(session_id)
+    my_ticket = next((t for t in tickets if t["user_id"] == user_id), None)
+    opp_ticket = next((t for t in tickets if opponent_id and t["user_id"] == opponent_id), None)
+
+    lines = [f"⚔️ **Duel Clashsport — {session['gross_entry_fee']} Coins**\n"]
+
+    if my_ticket:
+        match_ids = [str(p["match_id"]) for p in my_ticket["predictions"]]
+        matches = {str(m["api_match_id"]): m for m in database.get_matches_by_ids(match_ids)}
+        my_correct = 0
+        for p in my_ticket["predictions"]:
+            m = matches.get(str(p["match_id"]))
+            if not m:
+                continue
+            if m.get("result"):
+                icon = "👍" if m["result"] == p["pick"] else "😢"
+                if m["result"] == p["pick"]:
+                    my_correct += 1
+            else:
+                icon = "⏳"
+            lines.append(f"{icon} {m['home_team']} vs {m['away_team']}")
+        lines.append(f"\n🟢 **Toi : {my_correct}/{len(my_ticket['predictions'])}**")
+
+    if opp_ticket:
+        opp_matches = {str(m["api_match_id"]): m for m in database.get_matches_by_ids([str(p["match_id"]) for p in opp_ticket["predictions"]])}
+        opp_correct = sum(1 for p in opp_ticket["predictions"] if opp_matches.get(str(p["match_id"]), {}).get("result") == p["pick"])
+        lines.append(f"🔴 **Adversaire : {opp_correct}/{len(opp_ticket['predictions'])}**")
+    elif session["status"] == "WAITING":
+        lines.append("🔴 En attente d'un adversaire...")
+
+    keyboard = [
+        [InlineKeyboardButton("🔴 Voir en Direct", callback_data=f"live_{session_id}")],
+        [InlineKeyboardButton("🔙 Mes Tickets", callback_data="my_tickets")],
+    ]
+    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+def _live_verdict(pick, home_score, away_score):
+    if home_score is None or away_score is None:
+        return "⚪ pas encore commencé"
+    if home_score > away_score:
+        leading = "HOME"
+    elif away_score > home_score:
+        leading = "AWAY"
+    else:
+        leading = "DRAW"
+    return "🟢 en tête" if leading == pick else "🔻 mené"
+
+
+async def _build_live_text(session_ids, user_id):
+    all_match_ids = set()
+    my_tickets = {}
+    for sid in session_ids:
+        tickets = database.get_tickets_for_session(sid)
+        my_ticket = next((t for t in tickets if t["user_id"] == user_id), None)
+        my_tickets[sid] = my_ticket
+        if my_ticket:
+            all_match_ids.update(str(p["match_id"]) for p in my_ticket["predictions"])
+
+    if not all_match_ids:
+        return "📭 Aucun match à suivre pour l'instant."
+
+    live_data = await database.get_live_scores_for_matches(list(all_match_ids))
+
+    lines = ["🔴 **EN DIRECT — CLASHSPORT**\n"]
+    for sid in session_ids:
+        my_ticket = my_tickets.get(sid)
+        if not my_ticket:
+            continue
+        lines.append("⚔️ **Duel :**")
+        for p in my_ticket["predictions"]:
+            m = live_data.get(str(p["match_id"]))
+            if not m:
+                continue
+            home, away = m.get("live_score_home"), m.get("live_score_away")
+            status = m.get("live_status")
+            status_icon = {"live": "🔴 LIVE", "final": "🏁 TERMINÉ"}.get(status, "⚪")
+            score_txt = f"{home} - {away}" if home is not None else "à venir"
+            verdict = _live_verdict(p["pick"], home, away)
+            lines.append(f"{status_icon} {m['home_team']} {score_txt} {m['away_team']} — {verdict}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+async def live_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    sessions = [s for s in database.get_user_sessions(user_id, history_limit=0) if s["status"] in ("WAITING", "IN_PROGRESS")]
+    if not sessions:
+        await update.message.reply_text("📭 Aucun duel en cours à suivre en direct.")
+        return
+    await update.message.reply_text("🔴 Récupération des scores en direct...")
+    text = await _build_live_text([s["id"] for s in sessions], user_id)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def admin_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -312,6 +453,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db_user = database.get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
         text = f"👋 Bienvenue sur **Clashsport** !\n\n💰 **Votre Solde :** `{db_user['coins_balance']}` Coins"
         await query.edit_message_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+        return ConversationHandler.END
+
+    elif data == "my_tickets":
+        user = database.get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
+        sessions = database.get_user_sessions(user_id)
+        if not sessions:
+            await query.edit_message_text("📭 Aucun ticket pour l'instant.", reply_markup=main_menu_keyboard())
+            return ConversationHandler.END
+        await query.edit_message_text("📋 **Tes Tickets Clashsport**", reply_markup=_tickets_keyboard(sessions, user_id), parse_mode="Markdown")
+        return ConversationHandler.END
+
+    elif data.startswith("ticket_"):
+        session_id = data[len("ticket_"):]
+        await show_ticket_detail(query, context, session_id)
+        return ConversationHandler.END
+
+    elif data == "live_all":
+        sessions = [s for s in database.get_user_sessions(user_id, history_limit=0) if s["status"] in ("WAITING", "IN_PROGRESS")]
+        if not sessions:
+            await query.edit_message_text("📭 Aucun duel en cours à suivre en direct.", reply_markup=main_menu_keyboard())
+            return ConversationHandler.END
+        await query.edit_message_text("🔴 Récupération des scores en direct...")
+        text = await _build_live_text([s["id"] for s in sessions], user_id)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return ConversationHandler.END
+
+    elif data.startswith("live_"):
+        session_id = data[len("live_"):]
+        await query.edit_message_text("🔴 Récupération des scores en direct...")
+        text = await _build_live_text([session_id], user_id)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour au Ticket", callback_data=f"ticket_{session_id}")]])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
         return ConversationHandler.END
 
     elif data == "menu_account":
@@ -505,6 +679,10 @@ async def confirm_duel_final(query, context, user_id):
             parse_mode="Markdown",
         )
         try:
+            await context.bot.send_dice(chat_id=user_id, emoji="🎰")
+        except Exception:
+            pass
+        try:
             await context.bot.send_message(
                 chat_id=session["creator_id"],
                 text=(
@@ -536,6 +714,10 @@ async def confirm_duel_final(query, context, user_id):
             [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
         ])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        try:
+            await context.bot.send_dice(chat_id=user_id, emoji="🎰")
+        except Exception:
+            pass
 
 
 # --- ENREGISTREMENT DES HANDLERS ---
@@ -546,6 +728,8 @@ stake_conv_handler = ConversationHandler(
 )
 
 telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("tickets", tickets_command))
+telegram_app.add_handler(CommandHandler("live", live_command))
 telegram_app.add_handler(CommandHandler("give", admin_give))
 telegram_app.add_handler(CommandHandler("take", admin_take))
 telegram_app.add_handler(CommandHandler("stats", admin_stats))
