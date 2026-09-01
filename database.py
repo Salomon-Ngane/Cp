@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from supabase import create_client, Client
 import config
 import odds_api
@@ -147,6 +148,29 @@ def save_ticket(session_id: str, user_id: int, predictions: list):
     }
     return supabase.table("tickets").insert(ticket_data).execute().data[0]
 
+def get_tickets_for_session(session_id: str) -> list:
+    return supabase.table("tickets").select("*").eq("session_id", session_id).execute().data
+
+def get_user_sessions(user_id: int, history_limit: int = 3) -> list:
+    """Duels actifs (sans limite) + historique des `history_limit` derniers duels terminés."""
+    filter_str = f"creator_id.eq.{user_id},opponent_id.eq.{user_id}"
+
+    active = (
+        supabase.table("sessions").select("*")
+        .in_("status", ["WAITING", "IN_PROGRESS"])
+        .or_(filter_str)
+        .execute().data
+    )
+    completed = (
+        supabase.table("sessions").select("*")
+        .eq("status", "COMPLETED")
+        .or_(filter_str)
+        .order("created_at", desc=True)
+        .limit(history_limit)
+        .execute().data
+    )
+    return active + completed
+
 
 # --- RÉSOLUTION & PAIEMENT ---
 # NB : depuis la refonte multi-sport, chaque joueur a sa PROPRE grille (match_count
@@ -243,9 +267,9 @@ def resolve_duel(session_id: str):
 
 async def sync_matches_from_api_async():
     try:
-        matches, quota = await odds_api.sync_today_matches(config.ODDS_API_KEY)
+        matches, quota, calls_used = await odds_api.sync_today_matches(config.ODDS_API_KEY)
         if not matches:
-            return 0, "🔍 Aucun match trouvé pour aujourd'hui. Réessaie plus tard, le calendrier se remplit au fil de la journée !"
+            return 0, f"🔍 Aucun match trouvé pour aujourd'hui ({calls_used} appels effectués). Réessaie plus tard, le calendrier se remplit au fil de la journée !"
 
         saved = 0
         last_error = None
@@ -269,7 +293,45 @@ async def sync_matches_from_api_async():
         return saved, (
             f"🎉 **{saved} matchs sont sur le terrain et prêts à jouer !**\n"
             "🏅 Foot, Basket, Tennis — la journée est chargée.\n"
+            f"📞 Appels API utilisés : `{calls_used}`\n"
             f"📊 Requêtes API restantes ce mois-ci : `{quota}`"
         )
     except Exception as e:
         return 0, f"❌ Erreur pendant la synchronisation : `{str(e)}`"
+
+
+# --- SCORES EN DIRECT (cache partagé entre joueurs, 3 min) ---
+
+LIVE_CACHE_MAX_AGE_SECONDS = 180
+
+async def get_live_scores_for_matches(match_ids: list) -> dict:
+    """Renvoie le statut live des matchs demandés. Ne rappelle l'API que pour les
+    sports dont le cache local a plus de 3 minutes — mutualisé entre tous les joueurs."""
+    matches = get_matches_by_ids(match_ids)
+    now = datetime.now(timezone.utc)
+    sports_to_refresh = set()
+
+    for m in matches:
+        last_check = m.get("last_score_check")
+        if not last_check:
+            sports_to_refresh.add(m["sport"])
+            continue
+        last = datetime.fromisoformat(last_check.replace("Z", "+00:00"))
+        if (now - last).total_seconds() > LIVE_CACHE_MAX_AGE_SECONDS:
+            sports_to_refresh.add(m["sport"])
+
+    if sports_to_refresh:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            for sport in sports_to_refresh:
+                scores = await odds_api.fetch_live_scores(client, config.ODDS_API_KEY, sport)
+                for s in scores:
+                    supabase.table("matches").update({
+                        "live_score_home": s["home_score"],
+                        "live_score_away": s["away_score"],
+                        "live_status": s["status"],
+                        "last_score_check": now.isoformat(),
+                    }).eq("api_match_id", s["api_match_id"]).execute()
+        matches = get_matches_by_ids(match_ids)  # relire les valeurs fraîches
+
+    return {str(m["api_match_id"]): m for m in matches}
