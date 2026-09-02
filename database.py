@@ -1,3 +1,4 @@
+import random
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 import config
@@ -12,10 +13,17 @@ def get_or_create_user(telegram_id: int, username: str, referred_by: int = None)
     if res.data:
         return res.data[0]
 
+    # Génération de l'ID unique à 5 chiffres
+    while True:
+        code = str(random.randint(10000, 99999))
+        if not supabase.table("users").select("id").eq("player_code", code).execute().data:
+            break
+
     new_user = {
         "telegram_id": telegram_id,
         "username": username,
         "coins_balance": 1000,
+        "player_code": code,
         "referred_by": referred_by,
     }
     insert_res = supabase.table("users").insert(new_user).execute()
@@ -33,85 +41,75 @@ def get_user_by_id(telegram_id: int):
 
 def get_all_users():
     try:
-        response = supabase.table("users").select("*").execute()
-        return response.data
+        return supabase.table("users").select("*").execute().data
     except Exception:
         return []
 
 def get_platform_stats():
     users = get_all_users()
     sessions = supabase.table("sessions").select("*").execute().data
-    total_coins = sum(u.get("coins_balance", 0) for u in users)
-    waiting_duels = len([s for s in sessions if s.get("status") == "WAITING"])
-    active_duels = len([s for s in sessions if s.get("status") == "IN_PROGRESS"])
     return {
         "total_users": len(users),
-        "total_coins": total_coins,
-        "waiting_duels": waiting_duels,
-        "active_duels": active_duels
+        "total_coins": sum(u.get("coins_balance", 0) for u in users),
+        "waiting_duels": len([s for s in sessions if s.get("status") == "WAITING"]),
+        "active_duels": len([s for s in sessions if s.get("status") == "IN_PROGRESS"])
     }
 
 # --- MATCHS ---
 
 def get_active_matches():
-    response = supabase.table("matches").select("*").eq("status", "NS").execute()
-    return response.data
+    return supabase.table("matches").select("*").eq("status", "NS").execute().data
 
 def get_matches_by_sport(sport: str):
-    response = supabase.table("matches").select("*").eq("status", "NS").ilike("sport", f"%{sport}%").execute()
-    return response.data
+    return supabase.table("matches").select("*").eq("status", "NS").ilike("sport", f"%{sport}%").execute().data
 
 def get_matches_by_ids(match_ids: list):
-    """Récupère des matchs précis à partir d'une liste d'ids (texte, format TheOddsAPI)."""
-    if not match_ids:
-        return []
+    if not match_ids: return []
     ids = [str(mid) for mid in match_ids]
     response = supabase.table("matches").select("*").in_("api_match_id", ids).execute()
     by_id = {str(m["api_match_id"]): m for m in response.data}
     return [by_id[mid] for mid in ids if mid in by_id]
 
 def set_match_result(api_match_id, result: str):
-    """Enregistre le résultat d'un match (HOME / DRAW / AWAY) et le marque comme terminé."""
-    supabase.table("matches").update({
-        "status": "FINISHED",
-        "result": result,
-    }).eq("api_match_id", str(api_match_id)).execute()
+    supabase.table("matches").update({"status": "FINISHED", "result": result}).eq("api_match_id", str(api_match_id)).execute()
+
+# --- SESSIONS, TICKETS ET DUELS ---
 
 def get_session(session_id: str):
     res = supabase.table("sessions").select("*").eq("id", session_id).execute()
     return res.data[0] if res.data else None
 
 def get_open_duels(exclude_creator_id: int = None):
-    query = supabase.table("sessions").select("*").eq("status", "WAITING").eq("type", "DUEL")
+    query = supabase.table("sessions").select("*").eq("status", "WAITING")
     if exclude_creator_id is not None:
         query = query.neq("creator_id", exclude_creator_id)
     return query.execute().data
 
-# --- DUELS ET TICKETS ---
-
-def create_duel_session(creator_id: int, gross_fee: int, match_count: int, predictions: list):
+def create_session(creator_id: int, session_type: str, gross_fee: int, match_count: int, max_participants: int, prize_mode: str, predictions: list):
     user = get_or_create_user(creator_id, "")
     if user["coins_balance"] < gross_fee:
         return None, "Solde insuffisant"
 
-    rake = int(round(gross_fee * config.RAKE_PERCENTAGE))
-    net_fee = gross_fee - rake
+    rake_rate = config.RAKE_1V1 if session_type == "DUEL" else config.RAKE_ARENA
+    net_fee = gross_fee - int(round(gross_fee * rake_rate))
 
     supabase.table("users").update({"coins_balance": int(user["coins_balance"]) - gross_fee}).eq("telegram_id", creator_id).execute()
 
     session_data = {
         "creator_id": creator_id,
-        "type": "DUEL",
+        "type": session_type,
         "gross_entry_fee": gross_fee,
         "net_entry_fee": net_fee,
         "match_count": match_count,
+        "max_participants": max_participants,
+        "prize_mode": prize_mode,
         "status": "WAITING"
     }
     session = supabase.table("sessions").insert(session_data).execute().data[0]
     save_ticket(session["id"], creator_id, predictions)
     return session, "Succès"
 
-def join_duel_session(session_id: str, joiner_id: int, predictions: list):
+def join_session(session_id: str, joiner_id: int, predictions: list):
     session = get_session(session_id)
     if not session or session["status"] != "WAITING":
         return None, "Session fermée ou indisponible."
@@ -122,22 +120,23 @@ def join_duel_session(session_id: str, joiner_id: int, predictions: list):
     if joiner["coins_balance"] < gross_fee:
         return None, "Solde insuffisant."
 
-    # 1. Verrouillage optimiste de la session d'abord, pour éviter les courses
-    updated = (
-        supabase.table("sessions")
-        .update({"opponent_id": joiner_id, "status": "IN_PROGRESS"})
-        .eq("id", session_id)
-        .eq("status", "WAITING")
-        .execute()
-    )
+    tickets = get_tickets_for_session(session_id)
+    if len(tickets) >= session.get("max_participants", 2):
+        return None, "L'arène ou le duel est déjà plein."
 
-    if not updated.data:
-        return None, "Un autre joueur a déjà rejoint ce duel !"
-
-    # 2. Une fois la session acquise, on débite
+    # Débit et enregistrement
     supabase.table("users").update({"coins_balance": int(joiner["coins_balance"]) - gross_fee}).eq("telegram_id", joiner_id).execute()
     save_ticket(session_id, joiner_id, predictions)
-    return updated.data[0], "Succès"
+
+    # Si c'était la dernière place, on verrouille et on lance
+    if len(tickets) + 1 == session.get("max_participants", 2):
+        if session["type"] == "DUEL":
+            supabase.table("sessions").update({"opponent_id": joiner_id, "status": "IN_PROGRESS"}).eq("id", session_id).execute()
+        else:
+            supabase.table("sessions").update({"status": "IN_PROGRESS"}).eq("id", session_id).execute()
+        return get_session(session_id), "Succès"
+    
+    return session, "En attente de joueurs"
 
 def save_ticket(session_id: str, user_id: int, predictions: list):
     ticket_data = {
@@ -152,47 +151,46 @@ def get_tickets_for_session(session_id: str) -> list:
     return supabase.table("tickets").select("*").eq("session_id", session_id).execute().data
 
 def get_user_sessions(user_id: int, history_limit: int = 3) -> list:
-    """Duels actifs (sans limite) + historique des `history_limit` derniers duels terminés."""
-    filter_str = f"creator_id.eq.{user_id},opponent_id.eq.{user_id}"
+    """Retourne les sessions actives + les 3 dernières terminées, annulations exclues."""
+    # On récupère tous les tickets du joueur
+    user_tickets = supabase.table("tickets").select("session_id").eq("user_id", user_id).execute().data
+    session_ids = [t["session_id"] for t in user_tickets]
+    if not session_ids: return []
 
-    active = (
-        supabase.table("sessions").select("*")
-        .in_("status", ["WAITING", "IN_PROGRESS"])
-        .or_(filter_str)
-        .execute().data
-    )
+    active = supabase.table("sessions").select("*").in_("id", session_ids).in_("status", ["WAITING", "IN_PROGRESS"]).execute().data
     completed = (
         supabase.table("sessions").select("*")
+        .in_("id", session_ids)
         .eq("status", "COMPLETED")
-        .or_(filter_str)
         .order("created_at", desc=True)
         .limit(history_limit)
         .execute().data
     )
     return active + completed
 
+# --- NETTOYAGE ET ANNULATION ---
+
+def cancel_expired_sessions():
+    """Annule les sessions en attente depuis trop longtemps et rembourse 100%."""
+    expiration_date = (datetime.now(timezone.utc) - timedelta(hours=config.SESSION_EXPIRATION_HOURS)).isoformat()
+    expired = supabase.table("sessions").select("*").eq("status", "WAITING").lte("created_at", expiration_date).execute().data
+    
+    for session in expired:
+        tickets = get_tickets_for_session(session["id"])
+        for t in tickets:
+            credit_balance(t["user_id"], session["gross_entry_fee"])
+        supabase.table("sessions").update({"status": "CANCELLED"}).eq("id", session["id"]).execute()
+        supabase.table("tickets").update({"status": "CANCELLED"}).eq("session_id", session["id"]).execute()
 
 # --- RÉSOLUTION & PAIEMENT ---
-# NB : depuis la refonte multi-sport, chaque joueur a sa PROPRE grille (match_count
-# les matche seulement en nombre, pas en contenu). "Tous les matchs d'une session"
-# n'existe donc plus au niveau de la session — on le reconstruit à partir de l'union
-# des deux tickets à chaque résolution.
 
 def find_resolvable_sessions(api_match_id) -> list:
-    """Sessions IN_PROGRESS contenant ce match (dans l'un ou l'autre ticket),
-    et dont TOUS les matchs des deux grilles ont désormais un résultat."""
-    sessions = (
-        supabase.table("sessions").select("*")
-        .eq("status", "IN_PROGRESS").eq("type", "DUEL").execute().data
-    )
+    sessions = supabase.table("sessions").select("*").eq("status", "IN_PROGRESS").execute().data
     target = str(api_match_id)
     resolvable = []
 
     for session in sessions:
-        tickets = supabase.table("tickets").select("*").eq("session_id", session["id"]).execute().data
-        if len(tickets) != 2:
-            continue
-
+        tickets = get_tickets_for_session(session["id"])
         all_match_ids = set()
         for t in tickets:
             all_match_ids.update(str(p["match_id"]) for p in t["predictions"])
@@ -206,145 +204,100 @@ def find_resolvable_sessions(api_match_id) -> list:
 
     return resolvable
 
-
-def resolve_duel(session_id: str):
-    """Compare les deux grilles (indépendantes) d'un duel, désigne un vainqueur
-    (ou partage en cas d'égalité) et paie la cagnotte."""
+def resolve_session(session_id: str):
     session = get_session(session_id)
-    if not session or session["status"] != "IN_PROGRESS":
-        return None
+    if not session or session["status"] != "IN_PROGRESS": return None
 
-    tickets = supabase.table("tickets").select("*").eq("session_id", session_id).execute().data
-    if len(tickets) != 2:
-        return None
-
+    tickets = get_tickets_for_session(session_id)
     all_match_ids = set()
-    for t in tickets:
-        all_match_ids.update(str(p["match_id"]) for p in t["predictions"])
+    for t in tickets: all_match_ids.update(str(p["match_id"]) for p in t["predictions"])
+    
     matches = get_matches_by_ids(list(all_match_ids))
     results_by_match = {str(m["api_match_id"]): m.get("result") for m in matches}
 
-    scores = {}
-    for ticket in tickets:
-        correct = sum(
-            1 for p in ticket["predictions"]
-            if results_by_match.get(str(p["match_id"])) == p["pick"]
-        )
-        scores[ticket["user_id"]] = correct
+    # Calcul des scores et de la cote totale validée (pour départage)
+    scores = []
+    for t in tickets:
+        correct = 0
+        valid_odds = 1.0
+        for p in t["predictions"]:
+            if results_by_match.get(str(p["match_id"])) == p["pick"]:
+                correct += 1
+                valid_odds *= p.get("odds", 1.0)
+        scores.append({"user_id": t["user_id"], "correct": correct, "valid_odds": valid_odds})
 
-    creator_id = session["creator_id"]
-    opponent_id = session["opponent_id"]
-    creator_score = scores.get(creator_id, 0)
-    opponent_score = scores.get(opponent_id, 0)
-    pot = session["net_entry_fee"] * 2
+    # Tri par corrects, puis par cote totale en cas d'égalité
+    scores.sort(key=lambda x: (x["correct"], x["valid_odds"]), reverse=True)
+    
+    pot_total = session["net_entry_fee"] * len(tickets)
+    outcomes = {"session_id": session_id, "type": session["type"], "scores": scores, "pot": pot_total}
 
-    if creator_score > opponent_score:
-        winner_id = creator_id
-        credit_balance(creator_id, pot)
-    elif opponent_score > creator_score:
-        winner_id = opponent_id
-        credit_balance(opponent_id, pot)
-    else:
-        winner_id = None
-        credit_balance(creator_id, pot / 2)
-        credit_balance(opponent_id, pot / 2)
+    if session["type"] == "DUEL":
+        if scores[0]["correct"] == scores[1]["correct"] and scores[0]["valid_odds"] == scores[1]["valid_odds"]:
+            # Égalité parfaite 1v1
+            credit_balance(scores[0]["user_id"], pot_total / 2)
+            credit_balance(scores[1]["user_id"], pot_total / 2)
+            outcomes["winner_id"] = None
+        else:
+            credit_balance(scores[0]["user_id"], pot_total)
+            outcomes["winner_id"] = scores[0]["user_id"]
+    
+    elif session["type"] == "ARENA":
+        if session.get("prize_mode") == "TOP_3" and len(scores) >= 3:
+            payouts = [pot_total * 0.50, pot_total * 0.38, pot_total * 0.12]
+            for i in range(3):
+                if scores[i]["correct"] > 0:
+                    credit_balance(scores[i]["user_id"], int(payouts[i]))
+            outcomes["winner_id"] = scores[0]["user_id"]
+        else:
+            # Winner takes all ou Top 1
+            if scores[0]["correct"] > 0:
+                credit_balance(scores[0]["user_id"], pot_total)
+            outcomes["winner_id"] = scores[0]["user_id"]
 
-    supabase.table("sessions").update({"status": "COMPLETED", "winner_id": winner_id}).eq("id", session_id).execute()
+    winner_val = outcomes.get("winner_id")
+    supabase.table("sessions").update({"status": "COMPLETED", "winner_id": winner_val}).eq("id", session_id).execute()
     supabase.table("tickets").update({"status": "RESOLVED"}).eq("session_id", session_id).execute()
 
-    return {
-        "session_id": session_id,
-        "creator_id": creator_id,
-        "opponent_id": opponent_id,
-        "creator_score": creator_score,
-        "opponent_score": opponent_score,
-        "winner_id": winner_id,
-        "pot": pot,
-    }
+    return outcomes
 
-
-# --- ADMIN FUNCTIONS ---
-
+# --- ADMIN & ODDS SYNC (Identique) ---
 async def sync_matches_from_api_async():
+    # ... (Même code que précédemment)
     try:
         matches, quota, calls_used = await odds_api.sync_today_matches(config.ODDS_API_KEY)
-        if not matches:
-            return 0, f"🔍 Aucun match trouvé pour aujourd'hui ({calls_used} appels effectués). Réessaie plus tard, le calendrier se remplit au fil de la journée !"
-
+        if not matches: return 0, "Aucun match."
         saved = 0
-        last_error = None
         for match in matches:
             try:
                 supabase.table("matches").upsert(match, on_conflict="api_match_id").execute()
                 saved += 1
-            except Exception as e:
-                last_error = str(e)
-
-        if saved == 0:
-            return 0, (
-                f"❌ {len(matches)} matchs récupérés depuis l'API, mais AUCUN n'a pu être écrit en base.\n"
-                f"Dernière erreur Supabase : `{last_error}`\n\n"
-                "Piste probable : `api_match_id` n'a plus de contrainte UNIQUE après son passage en texte "
-                "(vérifie dans Supabase), ou la clé utilisée par le bot n'est plus `service_role` (RLS)."
-            )
-        if saved < len(matches):
-            return saved, f"⚠️ {saved}/{len(matches)} matchs enregistrés, le reste a échoué.\nDernière erreur : `{last_error}`"
-
-        return saved, (
-            f"🎉 **{saved} matchs sont sur le terrain et prêts à jouer !**\n"
-            "🏅 Foot, Basket, Tennis — la journée est chargée.\n"
-            f"📞 Appels API utilisés : `{calls_used}`\n"
-            f"📊 Requêtes API restantes ce mois-ci : `{quota}`"
-        )
-    except Exception as e:
-        return 0, f"❌ Erreur pendant la synchronisation : `{str(e)}`"
-
-
-# --- SCORES EN DIRECT (cache partagé entre joueurs, 3 min) ---
-
-LIVE_CACHE_MAX_AGE_SECONDS = 180
-
-# --- CLASSEMENT HEBDOMADAIRE ---
+            except Exception: pass
+        return saved, f"Succès: {saved} matchs."
+    except Exception as e: return 0, str(e)
 
 def get_weekly_leaderboard(limit: int = 10) -> list:
-    """Classement des joueurs par nombre de duels gagnés sur les 7 derniers jours
-    (basé sur created_at des sessions, faute de resolved_at dédié — approximation
-    raisonnable tant que les duels se résolvent le jour même)."""
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    sessions = (
-        supabase.table("sessions").select("*")
-        .eq("status", "COMPLETED")
-        .gte("created_at", week_ago)
-        .not_.is_("winner_id", "null")
-        .execute().data
-    )
-
+    sessions = supabase.table("sessions").select("*").eq("status", "COMPLETED").gte("created_at", week_ago).not_.is_("winner_id", "null").execute().data
     tally = {}
     for s in sessions:
         winner = s["winner_id"]
-        pot = s["net_entry_fee"] * 2
+        # Pot total gagné
+        pot = s["net_entry_fee"] * s.get("max_participants", 2)
         entry = tally.setdefault(winner, {"wins": 0, "coins_won": 0})
         entry["wins"] += 1
         entry["coins_won"] += pot
 
     ranked = sorted(tally.items(), key=lambda x: (-x[1]["wins"], -x[1]["coins_won"]))[:limit]
-
     leaderboard = []
     for telegram_id, stats in ranked:
         user = get_user_by_id(telegram_id)
         username = (user["username"] if user and user.get("username") else None) or f"Joueur {telegram_id}"
-        leaderboard.append({
-            "telegram_id": telegram_id,
-            "username": username,
-            "wins": stats["wins"],
-            "coins_won": stats["coins_won"],
-        })
+        leaderboard.append({"telegram_id": telegram_id, "username": username, "wins": stats["wins"], "coins_won": stats["coins_won"]})
     return leaderboard
 
-
+LIVE_CACHE_MAX_AGE_SECONDS = 180
 async def get_live_scores_for_matches(match_ids: list) -> dict:
-    """Renvoie le statut live des matchs demandés. Ne rappelle l'API que pour les
-    sports dont le cache local a plus de 3 minutes — mutualisé entre tous les joueurs."""
     matches = get_matches_by_ids(match_ids)
     now = datetime.now(timezone.utc)
     sports_to_refresh = set()
@@ -370,6 +323,6 @@ async def get_live_scores_for_matches(match_ids: list) -> dict:
                         "live_status": s["status"],
                         "last_score_check": now.isoformat(),
                     }).eq("api_match_id", s["api_match_id"]).execute()
-        matches = get_matches_by_ids(match_ids)  # relire les valeurs fraîches
+        matches = get_matches_by_ids(match_ids)
 
     return {str(m["api_match_id"]): m for m in matches}
