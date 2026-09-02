@@ -83,9 +83,20 @@ async def propose_join_duel(message, user_id, session_id, context):
     ])
     await message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
+async def user_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    leaderboard = database.get_weekly_leaderboard()
+    if not leaderboard:
+        await update.message.reply_text("🏆 **Classement Hebdomadaire**\n\nAucune victoire enregistrée cette semaine.")
+        return
+    text = "🏆 **CLASSEMENT HEBDOMADAIRE**\n\n"
+    for idx, item in enumerate(leaderboard, 1):
+        text += f"{idx}. **{item['username']}** — {item['wins']} victoire(s) ({item['coins_won']} Coins)\n"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 # ==========================================
-# RÉSOLUTION ADMIN (Avec support CANCEL)
+# COMMANDES ADMINISTRATEUR COMPLÈTES
 # ==========================================
+
 async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     args = context.args
@@ -103,26 +114,108 @@ async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         outcome = database.resolve_session(session["id"])
         if outcome:
             resolved_count += 1
-            # Notification spécifique pour les joueurs si récompense redistribuée
             for notif in outcome.get("notifications", []):
-                try:
-                    await context.bot.send_message(chat_id=notif["user_id"], text=notif["text"])
-                except Exception:
-                    pass
+                try: await context.bot.send_message(chat_id=notif["user_id"], text=notif["text"])
+                except Exception: pass
 
             if outcome.get("is_draw_refund"):
-                # Informer les participants du duel en cas d'égalité remboursée
                 for s_score in outcome.get("scores", []):
-                    try:
-                        await context.bot.send_message(chat_id=s_score["user_id"], text="🤝 Égalité parfaite ! Votre mise initiale vous a été intégralement remboursée.")
-                    except Exception:
-                        pass
+                    try: await context.bot.send_message(chat_id=s_score["user_id"], text="🤝 Égalité parfaite ! Votre mise vous a été intégralement remboursée.")
+                    except Exception: pass
 
-    await update.message.reply_text(f"✅ Résultat enregistré. 🏁 {resolved_count} duel(s)/arena(s) tranché(s).")
+    await update.message.reply_text(f"✅ Résultat enregistré. 🏁 {resolved_count} session(s) tranchée(s).")
 
+async def admin_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("❌ Usage : /give [telegram_id_ou_player_code] [montant]")
+        return
+    
+    target_raw, amount_str = args[0], _clean_number(args[1])
+    try:
+        amount = int(amount_str)
+        if target_raw.isdigit() and len(target_raw) == 5:
+            res = database.supabase.table("users").select("*").eq("player_code", target_raw).execute().data
+            user = res[0] if res else None
+        else:
+            user = database.get_user_by_id(int(target_raw))
+
+        if not user:
+            await update.message.reply_text("❌ Utilisateur introuvable.")
+            return
+
+        new_bal = database.admin_give_coins(user["telegram_id"], amount)
+        await update.message.reply_text(f"✅ `{amount}` Coins ajoutés à **{user['username']}**. Nouveau solde : `{new_bal}` Coins.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur : {str(e)}")
+
+async def admin_take(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("❌ Usage : /take [telegram_id_ou_player_code] [montant]")
+        return
+    try:
+        target_raw, amount = args[0], int(_clean_number(args[1]))
+        if target_raw.isdigit() and len(target_raw) == 5:
+            res = database.supabase.table("users").select("*").eq("player_code", target_raw).execute().data
+            user = res[0] if res else None
+        else:
+            user = database.get_user_by_id(int(target_raw))
+
+        if not user:
+            await update.message.reply_text("❌ Utilisateur introuvable.")
+            return
+
+        new_bal = database.admin_take_coins(user["telegram_id"], amount)
+        await update.message.reply_text(f"✅ Remise effectuée pour **{user['username']}**. Nouveau solde : `{new_bal}` Coins.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur : {str(e)}")
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    stats = database.get_detailed_stats()
+    text = (
+        "📊 **STATISTIQUES DE LA PLATEFORME**\n\n"
+        f"👥 Joueurs inscrits : `{stats['total_users']}`\n"
+        f"💰 Coins en circulation : `{stats['total_coins']}`\n"
+        f"🎟️ Tickets créés : `{stats['total_tickets']}`\n"
+        f"🟡 Salons en attente : `{stats['waiting_sessions']}`\n"
+        f"🔵 Duels / Arenas en cours : `{stats['active_sessions']}`\n"
+        f"🏁 Sessions terminées : `{stats['completed_sessions']}`\n"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def admin_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    await update.message.reply_text("⏳ Synchronisation avec Odds-API en cours...")
+    count, msg = await database.sync_matches_from_api_async()
+    await update.message.reply_text(f"🔄 Résultat : {msg}")
+
+async def admin_sweep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    database.cancel_expired_sessions()
+    await update.message.reply_text("🧹 Nettoyage des sessions expirées (>24h) effectué avec succès.")
+
+async def admin_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    msg_text = " ".join(context.args)
+    if not msg_text:
+        await update.message.reply_text("❌ Usage : /alert [votre message aux joueurs]")
+        return
+    
+    users = database.get_all_users()
+    sent = 0
+    for u in users:
+        try:
+            await context.bot.send_message(chat_id=u["telegram_id"], text=f"📢 **ANNONCE CLASHSPORT**\n\n{msg_text}", parse_mode="Markdown")
+            sent += 1
+        except Exception: pass
+    await update.message.reply_text(f"📢 Message diffusé à {sent}/{len(users)} joueurs.")
 
 # ==========================================
-# FLUX DE NAVIGATION ET CREATION
+# FLUX INTERACTIF UTILISATEUR
 # ==========================================
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,6 +244,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "create_type_duel":
         context.user_data["draft_duel"] = {"mode": "create", "type": "DUEL", "max_participants": 2, "prize_mode": "TOP_1"}
         await prompt_stake(query)
+
     elif data == "create_type_arena":
         context.user_data["draft_duel"] = {"mode": "create", "type": "ARENA"}
         text = "🏟️ **ARENA : Combien de participants au maximum ?**"
@@ -182,7 +276,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("stake_") and data != "stake_custom":
         stake = int(_clean_number(data.split("_")[1]))
         await init_draft_duel(query, context, user_id, stake)
-    
+
     elif data == "duel_list_public":
         duels = database.get_open_duels(exclude_creator_id=user_id)
         if not duels:
@@ -252,12 +346,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tab = parts[2] if len(parts) > 2 else "mine"
         await show_ticket_detail(query, context, session_id, tab)
 
+    elif data == "menu_top":
+        leaderboard = database.get_weekly_leaderboard()
+        text = "🏆 **CLASSEMENT HEBDOMADAIRE**\n\n"
+        if not leaderboard: text += "Aucune victoire enregistrée cette semaine."
+        else:
+            for idx, item in enumerate(leaderboard, 1):
+                text += f"{idx}. **{item['username']}** — {item['wins']} victoires ({item['coins_won']} Coins)\n"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]), parse_mode="Markdown")
+
     elif data == "live_all":
         sessions = [s for s in database.get_user_sessions(user_id, history_limit=0) if s["status"] in ("WAITING", "IN_PROGRESS")]
         if not sessions:
             await query.edit_message_text("📭 Aucun duel en cours à suivre.", reply_markup=main_menu_keyboard())
             return ConversationHandler.END
-        await query.edit_message_text("🔴 Récupération des scores...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]))
+        await query.edit_message_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]))
 
     elif data == "menu_account":
         db_user = database.get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
@@ -266,7 +369,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 Utilisateur : {db_user['username']}\n"
             f"🆔 Code Joueur (ID) : **`{db_user.get('player_code', 'N/A')}`**\n"
             f"💰 Solde : `{db_user['coins_balance']}` Coins\n\n"
-            "Communiquez votre Code Joueur pour les transactions."
+            "Communiquez votre Code Joueur pour vos transactions et recharges."
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
@@ -426,8 +529,6 @@ async def confirm_duel_final(query, context, user_id):
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Retour au Menu Principal", callback_data="menu_main")]])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        try: await context.bot.send_dice(chat_id=user_id, emoji="🎰")
-        except Exception: pass
     else:
         s_type = draft.get("type", "DUEL")
         max_p = draft.get("max_participants", 2)
@@ -489,20 +590,17 @@ async def show_ticket_detail(query, context, session_id, tab):
                 if not m: continue
                 icon = "⏳"
                 if m.get("result"):
-                    if m["result"] == "CANCEL":
-                        icon = "🚫 (Annulé)"
+                    if m["result"] == "CANCEL": icon = "🚫 (Annulé)"
                     elif m["result"] == p["pick"]:
                         icon = "👍"
                         my_correct += 1
-                    else:
-                        icon = "😢"
+                    else: icon = "😢"
                 text += f"{icon} {m['home_team']} vs {m['away_team']}\n"
             text += f"\n🟢 **Mon Score : {my_correct}/{total}**"
-        else:
-            text += "Vous n'avez pas de ticket ici."
+        else: text += "Vous n'avez pas de ticket ici."
     
     elif tab == "opp":
-        text += "👥 **Progression des Adversaires :**\n*(Détails et lives masqués)*\n\n"
+        text += "👥 **Progression des Adversaires :**\n\n"
         for t in tickets:
             if t["user_id"] == user_id: continue
             opp_user = database.get_user_by_id(t["user_id"])
@@ -519,21 +617,27 @@ async def show_ticket_detail(query, context, session_id, tab):
             
             text += f"👤 {opp_user.get('username', 'Joueur')} : `{finished}/{total}` terminés — {won} G / {finished - won} P\n"
         
-        if len(tickets) <= 1:
-            text += "⏳ *En attente d'adversaires...*"
+        if len(tickets) <= 1: text += "⏳ *En attente d'adversaires...*"
 
     btn_mine = InlineKeyboardButton("📍 Mon Ticket" + (" 🔹" if tab == "mine" else ""), callback_data=f"ticket_{session_id}_mine")
     btn_opp = InlineKeyboardButton("👥 Adversaires" + (" 🔹" if tab == "opp" else ""), callback_data=f"ticket_{session_id}_opp")
     
     keyboard = [[btn_mine, btn_opp]]
-    if tab == "mine" and session["status"] == "IN_PROGRESS":
-        keyboard.append([InlineKeyboardButton("🔴 Voir en Direct", callback_data=f"live_{session_id}")])
     keyboard.append([InlineKeyboardButton("⬅️ Retour Mes Tickets", callback_data="my_tickets")])
-    
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
+# Enregistrement des Handlers Utilisateurs & Admin
 telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("top", user_top))
+
 telegram_app.add_handler(CommandHandler("resolve", admin_resolve))
+telegram_app.add_handler(CommandHandler("give", admin_give))
+telegram_app.add_handler(CommandHandler("take", admin_take))
+telegram_app.add_handler(CommandHandler("stats", admin_stats))
+telegram_app.add_handler(CommandHandler("sync", admin_sync))
+telegram_app.add_handler(CommandHandler("sweep", admin_sweep))
+telegram_app.add_handler(CommandHandler("alert", admin_alert))
+
 telegram_app.add_handler(stake_conv_handler)
 telegram_app.add_handler(CallbackQueryHandler(button_handler))
 telegram_app.add_error_handler(error_handler)
@@ -558,6 +662,11 @@ async def process_webhook(request: Request):
     update = Update.de_json(req_data, telegram_app.bot)
     await telegram_app.process_update(update)
     return {"status": "ok"}
+
+@app.get("/cron/sweep")
+async def cron_sweep_endpoint():
+    database.cancel_expired_sessions()
+    return {"status": "success", "message": "Expired sessions cleaned"}
 
 if __name__ == "__main__":
     import uvicorn
