@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 import config
 import odds_api
@@ -303,6 +303,44 @@ async def sync_matches_from_api_async():
 # --- SCORES EN DIRECT (cache partagé entre joueurs, 3 min) ---
 
 LIVE_CACHE_MAX_AGE_SECONDS = 180
+
+# --- CLASSEMENT HEBDOMADAIRE ---
+
+def get_weekly_leaderboard(limit: int = 10) -> list:
+    """Classement des joueurs par nombre de duels gagnés sur les 7 derniers jours
+    (basé sur created_at des sessions, faute de resolved_at dédié — approximation
+    raisonnable tant que les duels se résolvent le jour même)."""
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    sessions = (
+        supabase.table("sessions").select("*")
+        .eq("status", "COMPLETED")
+        .gte("created_at", week_ago)
+        .not_.is_("winner_id", "null")
+        .execute().data
+    )
+
+    tally = {}
+    for s in sessions:
+        winner = s["winner_id"]
+        pot = s["net_entry_fee"] * 2
+        entry = tally.setdefault(winner, {"wins": 0, "coins_won": 0})
+        entry["wins"] += 1
+        entry["coins_won"] += pot
+
+    ranked = sorted(tally.items(), key=lambda x: (-x[1]["wins"], -x[1]["coins_won"]))[:limit]
+
+    leaderboard = []
+    for telegram_id, stats in ranked:
+        user = get_user_by_id(telegram_id)
+        username = (user["username"] if user and user.get("username") else None) or f"Joueur {telegram_id}"
+        leaderboard.append({
+            "telegram_id": telegram_id,
+            "username": username,
+            "wins": stats["wins"],
+            "coins_won": stats["coins_won"],
+        })
+    return leaderboard
+
 
 async def get_live_scores_for_matches(match_ids: list) -> dict:
     """Renvoie le statut live des matchs demandés. Ne rappelle l'API que pour les
