@@ -13,7 +13,6 @@ def get_or_create_user(telegram_id: int, username: str, referred_by: int = None)
     if res.data:
         return res.data[0]
 
-    # Génération sécurisée de l'ID unique à 5 chiffres
     while True:
         code = str(random.randint(10000, 99999))
         if not supabase.table("users").select("id").eq("player_code", code).execute().data:
@@ -45,14 +44,33 @@ def get_all_users():
     except Exception:
         return []
 
-def get_platform_stats():
+# --- SERVICES ADMIN (GIVE / TAKE / STATS) ---
+
+def admin_give_coins(telegram_id: int, amount: int):
+    return credit_balance(telegram_id, amount)
+
+def admin_take_coins(telegram_id: int, amount: int):
+    user = get_user_by_id(telegram_id)
+    if not user: return None
+    new_balance = max(0, int(user["coins_balance"]) - amount)
+    supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", telegram_id).execute()
+    return new_balance
+
+def get_detailed_stats():
     users = get_all_users()
     sessions = supabase.table("sessions").select("*").execute().data
+    tickets = supabase.table("tickets").select("*").execute().data
+    
+    total_coins = sum(u.get("coins_balance", 0) for u in users)
+    completed_sessions = [s for s in sessions if s.get("status") == "COMPLETED"]
+    
     return {
         "total_users": len(users),
-        "total_coins": sum(u.get("coins_balance", 0) for u in users),
-        "waiting_duels": len([s for s in sessions if s.get("status") == "WAITING"]),
-        "active_duels": len([s for s in sessions if s.get("status") == "IN_PROGRESS"])
+        "total_coins": total_coins,
+        "total_tickets": len(tickets),
+        "waiting_sessions": len([s for s in sessions if s.get("status") == "WAITING"]),
+        "active_sessions": len([s for s in sessions if s.get("status") == "IN_PROGRESS"]),
+        "completed_sessions": len(completed_sessions),
     }
 
 # --- MATCHS ---
@@ -71,10 +89,9 @@ def get_matches_by_ids(match_ids: list):
     return [by_id[mid] for mid in ids if mid in by_id]
 
 def set_match_result(api_match_id, result: str):
-    # result peut être HOME, DRAW, AWAY ou CANCEL
     supabase.table("matches").update({"status": "FINISHED", "result": result}).eq("api_match_id", str(api_match_id)).execute()
 
-# --- SESSIONS, TICKETS ET DUELS ---
+# --- SESSIONS ET TICKETS ---
 
 def get_session(session_id: str):
     res = supabase.table("sessions").select("*").eq("id", session_id).execute()
@@ -138,10 +155,18 @@ def join_session(session_id: str, joiner_id: int, predictions: list):
     return session, "En attente de joueurs"
 
 def save_ticket(session_id: str, user_id: int, predictions: list):
+    formatted_predictions = []
+    for p in predictions:
+        formatted_predictions.append({
+            "match_id": str(p["match_id"]),
+            "pick": p["pick"],
+            "odds": float(p.get("odds", 1.0))
+        })
+
     ticket_data = {
         "session_id": session_id,
         "user_id": user_id,
-        "predictions": predictions,
+        "predictions": formatted_predictions,
         "status": "PENDING",
     }
     return supabase.table("tickets").insert(ticket_data).execute().data[0]
@@ -214,12 +239,11 @@ def resolve_session(session_id: str):
         for p in t["predictions"]:
             match_res = results_by_match.get(str(p["match_id"]))
             if match_res == "CANCEL":
-                # Match annulé : compté neutre (cote 1.0, ne compte pas comme faux mais n'ajoute pas de point de bon pronostic direct ou géré neutre)
                 continue
             elif match_res == p["pick"]:
                 correct += 1
-                valid_odds *= p.get("odds", 1.0)
-        scores.append({"user_id": t["user_id"], "correct": correct, "valid_odds": valid_odds})
+                valid_odds *= float(p.get("odds", 1.0))
+        scores.append({"user_id": t["user_id"], "correct": correct, "valid_odds": round(valid_odds, 2)})
 
     scores.sort(key=lambda x: (x["correct"], x["valid_odds"]), reverse=True)
     pot_total = session["net_entry_fee"] * len(tickets)
@@ -227,7 +251,6 @@ def resolve_session(session_id: str):
 
     if session["type"] == "DUEL":
         if scores[0]["correct"] == scores[1]["correct"] and scores[0]["valid_odds"] == scores[1]["valid_odds"]:
-            # Remboursement intégral (Mise brute) en cas d'égalité parfaite
             gross_fee = session["gross_entry_fee"]
             credit_balance(scores[0]["user_id"], gross_fee)
             credit_balance(scores[1]["user_id"], gross_fee)
@@ -244,10 +267,9 @@ def resolve_session(session_id: str):
                 if scores[i]["correct"] > 0:
                     credit_balance(scores[i]["user_id"], int(payouts[i]))
                 else:
-                    # Pas de pronostic gagnant : redistribution vers le Don (❤️) et notification
                     outcomes["notifications"].append({
                         "user_id": scores[i]["user_id"],
-                        "text": "⚠️ Votre récompense de podium a été redistribuée pour cause d'absence de pronostics gagnants (0 bon pronostic)."
+                        "text": "⚠️ Votre récompense a été redistribuée vers le fonds Don (❤️) pour cause d'absence de pronostics gagnants."
                     })
             outcomes["winner_id"] = scores[0]["user_id"]
         else:
@@ -256,7 +278,7 @@ def resolve_session(session_id: str):
             else:
                 outcomes["notifications"].append({
                     "user_id": scores[0]["user_id"],
-                    "text": "⚠️ Votre récompense a été redistribuée pour cause d'absence de pronostics gagnants."
+                    "text": "⚠️ La cagnotte a été redistribuée pour cause d'absence de pronostics gagnants."
                 })
             outcomes["winner_id"] = scores[0]["user_id"]
 
@@ -276,7 +298,7 @@ async def sync_matches_from_api_async():
                 supabase.table("matches").upsert(match, on_conflict="api_match_id").execute()
                 saved += 1
             except Exception: pass
-        return saved, f"Succès: {saved} matchs."
+        return saved, f"Succès : {saved} matchs importés."
     except Exception as e: return 0, str(e)
 
 def get_weekly_leaderboard(limit: int = 10) -> list:
