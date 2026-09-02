@@ -32,6 +32,7 @@ def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⚔️ Créer / Rejoindre un Duel", callback_data="menu_duel")],
         [InlineKeyboardButton("📋 Mes Tickets", callback_data="my_tickets"), InlineKeyboardButton("🔴 Live", callback_data="live_all")],
+        [InlineKeyboardButton("🏆 Classement", callback_data="menu_top")],
         [InlineKeyboardButton("💳 Mon Compte", callback_data="menu_account")],
     ])
 
@@ -157,6 +158,24 @@ async def notify_duel_result(context: ContextTypes.DEFAULT_TYPE, outcome: dict):
                         pass
         except Exception:
             logging.exception(f"Impossible de notifier {player_id}")
+
+
+def _build_leaderboard_text():
+    leaderboard = database.get_weekly_leaderboard()
+    if not leaderboard:
+        return "📭 Aucun duel terminé cette semaine pour l'instant. Sois le premier à te hisser en tête !"
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 **CLASSEMENT DE LA SEMAINE — CLASHSPORT** 🏆\n"]
+    for i, entry in enumerate(leaderboard):
+        rank_icon = medals[i] if i < 3 else f"`#{i + 1}`"
+        lines.append(f"{rank_icon} **{entry['username']}** — {entry['wins']} victoire(s) · {entry['coins_won']} Coins gagnés")
+    lines.append("\n💪 Grimpe dans le classement : lance un duel avec /start !")
+    return "\n".join(lines)
+
+
+async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(_build_leaderboard_text(), parse_mode="Markdown")
 
 
 async def tickets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -455,6 +474,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
         return ConversationHandler.END
 
+    elif data == "menu_top":
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]])
+        await query.edit_message_text(_build_leaderboard_text(), reply_markup=keyboard, parse_mode="Markdown")
+        return ConversationHandler.END
+
     elif data == "my_tickets":
         user = database.get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
         sessions = database.get_user_sessions(user_id)
@@ -729,6 +753,7 @@ stake_conv_handler = ConversationHandler(
 
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("tickets", tickets_command))
+telegram_app.add_handler(CommandHandler("top", top_command))
 telegram_app.add_handler(CommandHandler("live", live_command))
 telegram_app.add_handler(CommandHandler("give", admin_give))
 telegram_app.add_handler(CommandHandler("take", admin_take))
