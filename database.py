@@ -13,7 +13,7 @@ def get_or_create_user(telegram_id: int, username: str, referred_by: int = None)
     if res.data:
         return res.data[0]
 
-    # Génération de l'ID unique à 5 chiffres
+    # Génération sécurisée de l'ID unique à 5 chiffres
     while True:
         code = str(random.randint(10000, 99999))
         if not supabase.table("users").select("id").eq("player_code", code).execute().data:
@@ -71,6 +71,7 @@ def get_matches_by_ids(match_ids: list):
     return [by_id[mid] for mid in ids if mid in by_id]
 
 def set_match_result(api_match_id, result: str):
+    # result peut être HOME, DRAW, AWAY ou CANCEL
     supabase.table("matches").update({"status": "FINISHED", "result": result}).eq("api_match_id", str(api_match_id)).execute()
 
 # --- SESSIONS, TICKETS ET DUELS ---
@@ -124,11 +125,9 @@ def join_session(session_id: str, joiner_id: int, predictions: list):
     if len(tickets) >= session.get("max_participants", 2):
         return None, "L'arène ou le duel est déjà plein."
 
-    # Débit et enregistrement
     supabase.table("users").update({"coins_balance": int(joiner["coins_balance"]) - gross_fee}).eq("telegram_id", joiner_id).execute()
     save_ticket(session_id, joiner_id, predictions)
 
-    # Si c'était la dernière place, on verrouille et on lance
     if len(tickets) + 1 == session.get("max_participants", 2):
         if session["type"] == "DUEL":
             supabase.table("sessions").update({"opponent_id": joiner_id, "status": "IN_PROGRESS"}).eq("id", session_id).execute()
@@ -151,8 +150,6 @@ def get_tickets_for_session(session_id: str) -> list:
     return supabase.table("tickets").select("*").eq("session_id", session_id).execute().data
 
 def get_user_sessions(user_id: int, history_limit: int = 3) -> list:
-    """Retourne les sessions actives + les 3 dernières terminées, annulations exclues."""
-    # On récupère tous les tickets du joueur
     user_tickets = supabase.table("tickets").select("session_id").eq("user_id", user_id).execute().data
     session_ids = [t["session_id"] for t in user_tickets]
     if not session_ids: return []
@@ -168,10 +165,7 @@ def get_user_sessions(user_id: int, history_limit: int = 3) -> list:
     )
     return active + completed
 
-# --- NETTOYAGE ET ANNULATION ---
-
 def cancel_expired_sessions():
-    """Annule les sessions en attente depuis trop longtemps et rembourse 100%."""
     expiration_date = (datetime.now(timezone.utc) - timedelta(hours=config.SESSION_EXPIRATION_HOURS)).isoformat()
     expired = supabase.table("sessions").select("*").eq("status", "WAITING").lte("created_at", expiration_date).execute().data
     
@@ -181,8 +175,6 @@ def cancel_expired_sessions():
             credit_balance(t["user_id"], session["gross_entry_fee"])
         supabase.table("sessions").update({"status": "CANCELLED"}).eq("id", session["id"]).execute()
         supabase.table("tickets").update({"status": "CANCELLED"}).eq("session_id", session["id"]).execute()
-
-# --- RÉSOLUTION & PAIEMENT ---
 
 def find_resolvable_sessions(api_match_id) -> list:
     sessions = supabase.table("sessions").select("*").eq("status", "IN_PROGRESS").execute().data
@@ -215,29 +207,32 @@ def resolve_session(session_id: str):
     matches = get_matches_by_ids(list(all_match_ids))
     results_by_match = {str(m["api_match_id"]): m.get("result") for m in matches}
 
-    # Calcul des scores et de la cote totale validée (pour départage)
     scores = []
     for t in tickets:
         correct = 0
         valid_odds = 1.0
         for p in t["predictions"]:
-            if results_by_match.get(str(p["match_id"])) == p["pick"]:
+            match_res = results_by_match.get(str(p["match_id"]))
+            if match_res == "CANCEL":
+                # Match annulé : compté neutre (cote 1.0, ne compte pas comme faux mais n'ajoute pas de point de bon pronostic direct ou géré neutre)
+                continue
+            elif match_res == p["pick"]:
                 correct += 1
                 valid_odds *= p.get("odds", 1.0)
         scores.append({"user_id": t["user_id"], "correct": correct, "valid_odds": valid_odds})
 
-    # Tri par corrects, puis par cote totale en cas d'égalité
     scores.sort(key=lambda x: (x["correct"], x["valid_odds"]), reverse=True)
-    
     pot_total = session["net_entry_fee"] * len(tickets)
-    outcomes = {"session_id": session_id, "type": session["type"], "scores": scores, "pot": pot_total}
+    outcomes = {"session_id": session_id, "type": session["type"], "scores": scores, "pot": pot_total, "notifications": []}
 
     if session["type"] == "DUEL":
         if scores[0]["correct"] == scores[1]["correct"] and scores[0]["valid_odds"] == scores[1]["valid_odds"]:
-            # Égalité parfaite 1v1
-            credit_balance(scores[0]["user_id"], pot_total / 2)
-            credit_balance(scores[1]["user_id"], pot_total / 2)
+            # Remboursement intégral (Mise brute) en cas d'égalité parfaite
+            gross_fee = session["gross_entry_fee"]
+            credit_balance(scores[0]["user_id"], gross_fee)
+            credit_balance(scores[1]["user_id"], gross_fee)
             outcomes["winner_id"] = None
+            outcomes["is_draw_refund"] = True
         else:
             credit_balance(scores[0]["user_id"], pot_total)
             outcomes["winner_id"] = scores[0]["user_id"]
@@ -248,11 +243,21 @@ def resolve_session(session_id: str):
             for i in range(3):
                 if scores[i]["correct"] > 0:
                     credit_balance(scores[i]["user_id"], int(payouts[i]))
+                else:
+                    # Pas de pronostic gagnant : redistribution vers le Don (❤️) et notification
+                    outcomes["notifications"].append({
+                        "user_id": scores[i]["user_id"],
+                        "text": "⚠️ Votre récompense de podium a été redistribuée pour cause d'absence de pronostics gagnants (0 bon pronostic)."
+                    })
             outcomes["winner_id"] = scores[0]["user_id"]
         else:
-            # Winner takes all ou Top 1
             if scores[0]["correct"] > 0:
                 credit_balance(scores[0]["user_id"], pot_total)
+            else:
+                outcomes["notifications"].append({
+                    "user_id": scores[0]["user_id"],
+                    "text": "⚠️ Votre récompense a été redistribuée pour cause d'absence de pronostics gagnants."
+                })
             outcomes["winner_id"] = scores[0]["user_id"]
 
     winner_val = outcomes.get("winner_id")
@@ -261,9 +266,7 @@ def resolve_session(session_id: str):
 
     return outcomes
 
-# --- ADMIN & ODDS SYNC (Identique) ---
 async def sync_matches_from_api_async():
-    # ... (Même code que précédemment)
     try:
         matches, quota, calls_used = await odds_api.sync_today_matches(config.ODDS_API_KEY)
         if not matches: return 0, "Aucun match."
@@ -282,7 +285,6 @@ def get_weekly_leaderboard(limit: int = 10) -> list:
     tally = {}
     for s in sessions:
         winner = s["winner_id"]
-        # Pot total gagné
         pot = s["net_entry_fee"] * s.get("max_participants", 2)
         entry = tally.setdefault(winner, {"wins": 0, "coins_won": 0})
         entry["wins"] += 1
