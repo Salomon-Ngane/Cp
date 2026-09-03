@@ -61,6 +61,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
+async def user_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    database.cancel_expired_sessions()
+    sessions = database.get_user_sessions(user_id)
+    if not sessions:
+        await update.message.reply_text("📭 Aucun ticket pour l'instant.", reply_markup=main_menu_keyboard())
+        return
+    await update.message.reply_text("📋 **Tes Tickets Clashsport**", reply_markup=_tickets_keyboard(sessions, user_id), parse_mode="Markdown")
+
+async def user_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    sessions = [s for s in database.get_user_sessions(user_id, history_limit=0) if s["status"] in ("WAITING", "IN_PROGRESS")]
+    if not sessions:
+        await update.message.reply_text("📭 Aucun duel en cours à suivre.", reply_markup=main_menu_keyboard())
+        return
+    await update.message.reply_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]))
+
 async def propose_join_duel(message, user_id, session_id, context):
     session = database.get_session(session_id)
     if not session or session["status"] != "WAITING":
@@ -629,6 +646,8 @@ async def show_ticket_detail(query, context, session_id, tab):
 # Enregistrement des Handlers Utilisateurs & Admin
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("top", user_top))
+telegram_app.add_handler(CommandHandler("tickets", user_tickets))
+telegram_app.add_handler(CommandHandler("live", user_live))
 
 telegram_app.add_handler(CommandHandler("resolve", admin_resolve))
 telegram_app.add_handler(CommandHandler("give", admin_give))
