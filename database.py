@@ -15,7 +15,7 @@ def get_or_create_user(telegram_id: int, username: str, referred_by: int = None)
 
     while True:
         code = str(random.randint(10000, 99999))
-        if not supabase.table("users").select("id").eq("player_code", code).execute().data:
+        if not supabase.table("users").select("telegram_id").eq("player_code", code).execute().data:
             break
 
     new_user = {
@@ -57,9 +57,10 @@ def admin_take_coins(telegram_id: int, amount: int):
     return new_balance
 
 def get_detailed_stats():
-    users = get_all_users()
-    sessions = supabase.table("sessions").select("*").execute().data
-    tickets = supabase.table("tickets").select("*").execute().data
+    # Optimisation : On ne télécharge plus l'intégralité des tables en RAM, juste les colonnes strictement nécessaires
+    users = supabase.table("users").select("coins_balance").execute().data
+    sessions = supabase.table("sessions").select("status").execute().data
+    tickets = supabase.table("tickets").select("session_id").execute().data
     
     total_coins = sum(u.get("coins_balance", 0) for u in users)
     completed_sessions = [s for s in sessions if s.get("status") == "COMPLETED"]
@@ -203,11 +204,23 @@ def cancel_expired_sessions():
 
 def find_resolvable_sessions(api_match_id) -> list:
     sessions = supabase.table("sessions").select("*").eq("status", "IN_PROGRESS").execute().data
+    if not sessions:
+        return []
+        
+    session_ids = [s["id"] for s in sessions]
+    
+    # Optimisation : On télécharge tous les tickets liés aux sessions actives en UNE SEULE requête
+    all_tickets = supabase.table("tickets").select("*").in_("session_id", session_ids).execute().data
+    
+    tickets_by_session = {}
+    for t in all_tickets:
+        tickets_by_session.setdefault(t["session_id"], []).append(t)
+
     target = str(api_match_id)
     resolvable = []
 
     for session in sessions:
-        tickets = get_tickets_for_session(session["id"])
+        tickets = tickets_by_session.get(session["id"], [])
         all_match_ids = set()
         for t in tickets:
             all_match_ids.update(str(p["match_id"]) for p in t["predictions"])
