@@ -27,6 +27,17 @@ PRIORITY_BASKETBALL = [
     "basketball_nba",
 ]
 
+# Mapping des clés sport vers noms lisibles
+SPORT_LEAGUE_NAMES = {
+    "soccer_epl": "EPL Premier League",
+    "soccer_spain_la_liga": "La Liga",
+    "soccer_uefa_champs_league": "UEFA Champions League",
+    "soccer_italy_serie_a": "Serie A",
+    "soccer_germany_bundesliga": "Bundesliga",
+    "soccer_france_ligue_one": "Ligue 1",
+    "basketball_nba": "NBA",
+}
+
 MAX_TENNIS_SLOTS = 2   # tournois découverts dynamiquement (clés changeantes)
 MAX_TOTAL_CALLS = 10   # plafond dur, quoi qu'il arrive
 
@@ -51,6 +62,16 @@ def _extract_odds(event: dict) -> dict:
                         odds["draw"] = price
                 return odds
     return {"home": None, "draw": None, "away": None}
+
+
+def _get_league_name(sport_key: str) -> str:
+    """Retourne le nom lisible du championnat."""
+    if sport_key in SPORT_LEAGUE_NAMES:
+        return SPORT_LEAGUE_NAMES[sport_key]
+    # Fallback pour les tournois tennis dynamiques
+    if "tennis" in sport_key:
+        return sport_key.replace("tennis_", "").replace("_", " ").title()
+    return sport_key.replace("_", " ").title()
 
 
 async def _discover_top_tennis_keys(client: httpx.AsyncClient, api_key: str, limit: int) -> list:
@@ -93,6 +114,7 @@ async def sync_today_matches(api_key: str):
             if resp.status_code != 200:
                 continue
 
+            league_name = _get_league_name(sport_key)
             for event in resp.json():
                 if not event.get("commence_time") or not _is_today(event["commence_time"]):
                     continue
@@ -100,6 +122,7 @@ async def sync_today_matches(api_key: str):
                 normalized.append({
                     "api_match_id": str(event["id"]),
                     "sport": sport_key,
+                    "league": league_name,
                     "home_team": event["home_team"],
                     "away_team": event["away_team"],
                     "commence_time": event["commence_time"],
