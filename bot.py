@@ -54,6 +54,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     db_user = database.get_or_create_user(user.id, user.username or user.first_name)
+    
+    # 📢 Notification admin : nouvel utilisateur
+    try:
+        admin_msg = (
+            f"👤 **NOUVEL UTILISATEUR INSCRIT**\n\n"
+            f"Nom : {db_user['username']}\n"
+            f"🆔 Code Joueur : `{db_user['player_code']}`\n"
+            f"Telegram ID : `{user.id}`"
+        )
+        await telegram_app.bot.send_message(chat_id=config.ADMIN_TELEGRAM_ID, text=admin_msg, parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Erreur envoi notif admin inscription : {e}")
+    
     text = (
         f"👋 Bienvenue **{user.first_name}** sur **Clashsport** !\n\n"
         f"💰 **Votre Solde :** `{db_user['coins_balance']}` Coins\n\n"
@@ -315,7 +328,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         db_user = database.get_or_create_user(user_id, "")
         if db_user["coins_balance"] < session["gross_entry_fee"]:
-            await query.edit_message_text(f"❌ **Solde insuffisant !**\nIl vous faut `{session['gross_entry_fee']}` Coins.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]]), parse_mode="Markdown")
+            await query.edit_message_text(f"❌ **Solde insuffisant !**\nIl vous faut `{session['gross_entry_fee']}` Coins.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]]))
             return ConversationHandler.END
 
         context.user_data["draft_duel"] = {"mode": "join", "session_id": session_id, "stake": session["gross_entry_fee"], "match_count": session["match_count"], "selected_matches": {}}
@@ -381,6 +394,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "menu_account":
         db_user = database.get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
+        admin_username = "clashsportadmin"  # À remplacer par le vrai username de l'admin
+        recharge_link = f"https://t.me/{admin_username}?text=Recharge%20pour%20mon%20ID%20:%20{db_user['player_code']}"
+        
         text = (
             f"💳 **Mon Compte — Clashsport**\n\n"
             f"👤 Utilisateur : {db_user['username']}\n"
@@ -388,7 +404,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 Solde : `{db_user['coins_balance']}` Coins\n\n"
             "Communiquez votre Code Joueur pour vos transactions et recharges."
         )
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Recharger mon compte", url=recharge_link)],
+            [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
+        ])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 async def prompt_stake(query):
@@ -440,7 +459,7 @@ stake_conv_handler = ConversationHandler(
 async def init_draft_duel(query, context, user_id, stake):
     db_user = database.get_or_create_user(user_id, "")
     if db_user["coins_balance"] < stake:
-        await query.edit_message_text(f"❌ **Solde insuffisant !**\nMise requise : `{stake}` Coins.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]), parse_mode="Markdown")
+        await query.edit_message_text(f"❌ **Solde insuffisant !**\nMise requise : `{stake}` Coins.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]))
         return
     draft = context.user_data.get("draft_duel", {})
     draft["stake"] = stake
@@ -475,7 +494,13 @@ async def show_leagues_for_sport(query, context, sport):
         keyboard.append([InlineKeyboardButton(f"🏅 {league}", callback_data=f"league_{league}")])
 
     keyboard.append([InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
-    await query.edit_message_text(f"🏆 **Championnats — {sport.upper()}**\n\nSélectionnez une compétition :", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    
+    if not leagues:
+        text = f"🏆 **Championnats — {sport.upper()}**\n\n⏳ Aucun match disponible pour le moment."
+    else:
+        text = f"🏆 **Championnats — {sport.upper()}**\n\nSélectionnez une compétition :"
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def show_matches_for_league(query, context, league):
     draft = context.user_data.get("draft_duel", {})
@@ -546,6 +571,10 @@ async def confirm_duel_final(query, context, user_id):
         )
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Retour au Menu Principal", callback_data="menu_main")]])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        
+        # 📢 Notification aux participants : lancement du duel/arène
+        session = database.get_session(draft["session_id"])
+        await _notify_session_launch(session, user_id)
     else:
         s_type = draft.get("type", "DUEL")
         max_p = draft.get("max_participants", 2)
@@ -573,12 +602,34 @@ async def confirm_duel_final(query, context, user_id):
         ])
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
+async def _notify_session_launch(session, new_joiner_id):
+    """Notifie tous les participants qu'une session a démarré."""
+    if not session or session["status"] != "IN_PROGRESS":
+        return
+    
+    tickets = database.get_tickets_for_session(session["id"])
+    user_ids = set(t["user_id"] for t in tickets)
+    
+    s_type = "Duel 1v1" if session["type"] == "DUEL" else f"Arena ({session.get('max_participants')} joueurs)"
+    msg = (
+        f"🚀 **{s_type} LANCÉ !** 🚀\n\n"
+        f"💰 Mise : `{session['gross_entry_fee']}` Coins\n"
+        f"🎯 Matchs : `{session['match_count']}`\n\n"
+        "Tous les tickets sont verrouillés. Le compte à rebours a commencé !"
+    )
+    
+    for user_id in user_ids:
+        try:
+            await telegram_app.bot.send_message(chat_id=user_id, text=msg, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Erreur notification lancement session à {user_id} : {e}")
+
 def _tickets_keyboard(sessions, user_id):
     keyboard = []
     for s in sessions:
-        if s["status"] == "WAITING": icon = "🟡"
-        elif s["status"] == "IN_PROGRESS": icon = "🔵"
-        else: icon = "⚪"
+        if s["status"] == "WAITING": icon = "⚪"
+        elif s["status"] == "IN_PROGRESS": icon = "🟢"
+        else: icon = "🔵"
         
         t_label = "Arena" if s["type"] == "ARENA" else "Duel"
         keyboard.append([InlineKeyboardButton(f"{icon} {t_label} {s['gross_entry_fee']} C ({s['match_count']}m)", callback_data=f"ticket_{s['id']}_mine")])
@@ -595,7 +646,8 @@ async def show_ticket_detail(query, context, session_id, tab):
     tickets = database.get_tickets_for_session(session_id)
     my_ticket = next((t for t in tickets if t["user_id"] == user_id), None)
     
-    text = f"⚔️ **Session {session['type']} — {session['gross_entry_fee']} Coins**\nStatut: {session['status']}\n\n"
+    status_icon = {"WAITING": "⚪", "IN_PROGRESS": "🟢", "COMPLETED": "🔵"}.get(session['status'], "⚪")
+    text = f"⚔️ **Session {session['type']} — {session['gross_entry_fee']} Coins**\n{status_icon} Statut: {session['status']}\n\n"
     
     if tab == "mine":
         if my_ticket:
@@ -614,7 +666,18 @@ async def show_ticket_detail(query, context, session_id, tab):
                     else: icon = "😢"
                 text += f"{icon} {m['home_team']} vs {m['away_team']}\n"
             text += f"\n🟢 **Mon Score : {my_correct}/{total}**"
-        else: text += "Vous n'avez pas de ticket ici."
+            
+            # Afficher le verdict final si complété
+            if session['status'] == 'COMPLETED':
+                winner_id = session.get('winner_id')
+                if winner_id == user_id:
+                    text += "\n\n✨ **VICTOIRE !** ✨"
+                elif winner_id is None:
+                    text += "\n\n🤝 **ÉGALITÉ PARFAITE**"
+                else:
+                    text += "\n\n😔 Vous avez perdu."
+        else: 
+            text += "Vous n'avez pas de ticket ici."
     
     elif tab == "opp":
         text += "👥 **Progression des Adversaires :**\n\n"
@@ -632,7 +695,7 @@ async def show_ticket_detail(query, context, session_id, tab):
                         finished += 1
                         if m["result"] == p["pick"]: won += 1
             
-            text += f"👤 {opp_user.get('username', 'Joueur')} : `{finished}/{total}` terminés — {won} G / {finished - won} P\n"
+            text += f"👤 {opp_user.get('username', 'Joueur')} : `{finished}/{total}` — {won}G / {finished - won}P\n"
         
         if len(tickets) <= 1: text += "⏳ *En attente d'adversaires...*"
 
