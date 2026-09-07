@@ -57,7 +57,6 @@ def admin_take_coins(telegram_id: int, amount: int):
     return new_balance
 
 def get_detailed_stats():
-    # Optimisation : On ne télécharge plus l'intégralité des tables en RAM, juste les colonnes strictement nécessaires
     users = supabase.table("users").select("coins_balance").execute().data
     sessions = supabase.table("sessions").select("status").execute().data
     tickets = supabase.table("tickets").select("session_id").execute().data
@@ -209,7 +208,6 @@ def find_resolvable_sessions(api_match_id) -> list:
         
     session_ids = [s["id"] for s in sessions]
     
-    # Optimisation : On télécharge tous les tickets liés aux sessions actives en UNE SEULE requête
     all_tickets = supabase.table("tickets").select("*").in_("session_id", session_ids).execute().data
     
     tickets_by_session = {}
@@ -363,3 +361,37 @@ async def get_live_scores_for_matches(match_ids: list) -> dict:
         matches = get_matches_by_ids(match_ids)
 
     return {str(m["api_match_id"]): m for m in matches}
+
+
+# --- GESTION DU PANIER PERSISTANT (NOUVEAU) ---
+
+def set_draft_settings(user_id: int, settings: dict):
+    settings["user_id"] = user_id
+    supabase.table("draft_settings").upsert(settings).execute()
+
+def get_draft_settings(user_id: int):
+    res = supabase.table("draft_settings").select("*").eq("user_id", user_id).execute()
+    return res.data[0] if res.data else None
+
+def clear_draft(user_id: int):
+    supabase.table("draft_settings").delete().eq("user_id", user_id).execute()
+    supabase.table("cart").delete().eq("user_id", user_id).execute()
+
+def toggle_cart_item(user_id: int, match_id: str, pick: str, odds: float):
+    existing = supabase.table("cart").select("*").eq("user_id", user_id).eq("match_id", str(match_id)).execute()
+    
+    if existing.data:
+        if existing.data[0]["pick"] == pick:
+            supabase.table("cart").delete().eq("user_id", user_id).eq("match_id", str(match_id)).execute()
+        else:
+            supabase.table("cart").update({"pick": pick, "odds": float(odds)}).eq("user_id", user_id).eq("match_id", str(match_id)).execute()
+    else:
+        supabase.table("cart").insert({
+            "user_id": user_id, 
+            "match_id": str(match_id), 
+            "pick": pick, 
+            "odds": float(odds)
+        }).execute()
+
+def get_cart(user_id: int):
+    return supabase.table("cart").select("*").eq("user_id", user_id).execute().data
