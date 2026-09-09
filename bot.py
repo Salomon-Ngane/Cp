@@ -490,11 +490,20 @@ async def init_draft_duel(query, user_id, stake):
     database.set_draft_settings(user_id, settings)
     await show_sport_selection_menu(query, user_id)
 
+# ==========================================
+# AFFICHAGE ET NORMES V0.2 (CORRECTION HTML)
+# ==========================================
+
 async def show_sport_selection_menu(query, user_id):
     settings = database.get_draft_settings(user_id) or {}
     cart_items = database.get_cart(user_id)
     
-    text = f"🏟️ **Ticket Clashsport**\n💰 Mise : `{settings.get('stake', 0)}` Coins\n🎯 Matchs au panier : `{len(cart_items)}`\n\nChoisissez une discipline :"
+    text = (
+        f"🏟️ <b>Ticket Clashsport</b>\n"
+        f"💰 Mise : <code>{settings.get('stake', 0)}</code> Coins\n"
+        f"🎯 Matchs au panier : <code>{len(cart_items)}</code>\n\n"
+        "Choisissez une discipline :"
+    )
     keyboard = [
         [InlineKeyboardButton("⚽ Football", callback_data="sport_soccer"), InlineKeyboardButton("🏀 Basketball", callback_data="sport_basketball")],
         [InlineKeyboardButton("🎾 Tennis", callback_data="sport_tennis")],
@@ -502,7 +511,9 @@ async def show_sport_selection_menu(query, user_id):
     if len(cart_items) >= 1:
         keyboard.append([InlineKeyboardButton(f"✅ Voir mon panier ({len(cart_items)})", callback_data="review_ticket")])
     keyboard.append([InlineKeyboardButton("❌ Annuler & Vider le panier", callback_data="cancel_creation")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
 
 async def show_leagues_for_sport(query, user_id, sport):
     matches = database.get_matches_by_sport(sport)
@@ -515,18 +526,17 @@ async def show_leagues_for_sport(query, user_id, sport):
     keyboard.append([InlineKeyboardButton("🔙 Changer de Sport", callback_data="select_sports")])
 
     for idx, league in enumerate(leagues):
-        # Utilisation de l'index au lieu du nom brut dans le callback pour éviter les crashs avec '_'
         keyboard.append([InlineKeyboardButton(f"🏅 {league}", callback_data=f"league_{sport}_{idx}")])
 
     keyboard.append([InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
     
     sport_clean = sport.upper()
     if not leagues:
-        text = f"🏆 **Championnats — {sport_clean}**\n\n⏳ Aucun match disponible pour le moment."
+        text = f"🏆 <b>Championnats — {sport_clean}</b>\n\n⏳ Aucun match disponible pour le moment."
     else:
-        text = f"🏆 **Championnats — {sport_clean}**\n\nSélectionnez une compétition :"
+        text = f"🏆 <b>Championnats — {sport_clean}</b>\n\nSélectionnez une compétition :"
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
 async def show_matches_for_league(query, user_id, league, sport):
@@ -550,134 +560,24 @@ async def show_matches_for_league(query, user_id, league, sport):
         keyboard.append([InlineKeyboardButton(f"⚽ {m['home_team']} vs {m['away_team']}", callback_data="ignore")])
         if m.get("odds_draw"):
             btn_d = f"N ({m.get('odds_draw')})" + (" ✅" if current_pick == "DRAW" else "")
-            keyboard.append([InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"), InlineKeyboardButton(btn_d, callback_data=f"pick_{m_id}_DRAW"), InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY")])
+            keyboard.append([
+                InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
+                InlineKeyboardButton(btn_d, callback_data=f"pick_{m_id}_DRAW"),
+                InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY")
+            ])
         else:
-            keyboard.append([InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"), InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY")])
+            keyboard.append([
+                InlineKeyboardButton(btn_h, callback_data=f"pick_{m_id}_HOME"),
+                InlineKeyboardButton(btn_a, callback_data=f"pick_{m_id}_AWAY")
+            ])
 
     keyboard.append([InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
-    await query.edit_message_text(f"🏟️ **{league}**\n📊 Panier : **{len(cart_items)} match(s)**\n", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-async def show_ticket_review(query, user_id):
-    settings = database.get_draft_settings(user_id) or {}
-    cart_items = database.get_cart(user_id)
-    stake = settings.get("stake", 100)
-    mode = settings.get("mode", "create")
-    req_match = settings.get("req_match_count")
     
-    match_ids = [c["match_id"] for c in cart_items]
-    matches_data = {str(m["api_match_id"]): m for m in database.get_matches_by_ids(match_ids)}
-    
-    text = f"📋 **Récapitulatif Ticket**\n💰 Mise : `{stake}` Coins\n🎯 Matchs : `{len(cart_items)}`\n\n"
-    for item in cart_items:
-        m = matches_data.get(item["match_id"])
-        if not m: continue
-        p_label = m["home_team"] if item["pick"] == "HOME" else (m["away_team"] if item["pick"] == "AWAY" else "Nul")
-        text += f"• {m['home_team']} vs {m['away_team']} ➔ **{p_label}** (Cote: {item['odds']})\n"
-
-    keyboard = []
-    if mode == "join" and len(cart_items) != req_match:
-        text += f"\n⚠️ *Vous devez sélectionner EXACTEMENT {req_match} matchs pour rejoindre (Actuellement {len(cart_items)}).* "
-    elif len(cart_items) >= 1:
-        keyboard.append([InlineKeyboardButton("🚀 Valider le Ticket", callback_data="confirm_duel_creation")])
-        
-    keyboard.append([InlineKeyboardButton("➕ Ajouter / Modifier", callback_data="back_to_sports")])
-    keyboard.append([InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-
-async def confirm_duel_final(query, user_id):
-    settings = database.get_draft_settings(user_id)
-    cart_items = database.get_cart(user_id)
-    
-    if not settings or not cart_items:
-        await query.edit_message_text("❌ Session expirée. Veuillez recommencer.", reply_markup=main_menu_keyboard())
-        return
-
-    mode = settings.get("mode", "create")
-    stake = settings.get("stake", 100)
-    predictions = [{"match_id": c["match_id"], "pick": c["pick"], "odds": c["odds"]} for c in cart_items]
-
-    if mode == "join":
-        session, msg = database.join_session(str(settings["target_session_id"]), user_id, predictions)
-        if not session:
-            await query.edit_message_text(f"❌ Erreur : {msg}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]))
-            return
-        
-        database.clear_draft(user_id)
-        db_user = database.get_user_by_id(user_id)
-        
-        text = (
-            "⚔️ **TICKET VALIDÉ !** ⚔️\n\n"
-            f"💰 Ton nouveau solde : `{db_user['coins_balance']}` Coins\n\n"
-            "Le défi est accepté. Tu peux suivre l'avancée dans Mes Tickets."
-        )
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Retour au Menu Principal", callback_data="menu_main")]])
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-        
-        session = database.get_session(str(settings["target_session_id"]))
-        await _notify_session_launch(session, user_id)
-    else:
-        s_type = settings.get("session_type", "DUEL")
-        max_p = settings.get("max_participants", 2)
-        p_mode = settings.get("prize_mode", "TOP_1")
-        
-        session, msg = database.create_session(user_id, s_type, stake, len(predictions), max_p, p_mode, predictions)
-        
-        if not session:
-            await query.edit_message_text(f"❌ Erreur : {msg}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]))
-            return
-            
-        database.clear_draft(user_id)
-        db_user = database.get_user_by_id(user_id)
-        bot_username = (await telegram_app.bot.get_me()).username
-        share_link = f"https://t.me/{bot_username}?start=join_{session['id']}"
-        
-        text = (
-            "🔥 **SALON CRÉÉ !** 🔥\n\n"
-            f"💰 Mise : `{stake}` Coins | Solde restant : `{db_user['coins_balance']}`\n"
-            f"🎯 Ticket verrouillé : `{len(predictions)}` matchs\n\n"
-            f"🔗 **Lien d'invitation à partager :**\n`{share_link}`"
-        )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📤 Partager", url=f"https://t.me/share/url?url={share_link}&text=Rejoins-moi%20sur%20Clashsport%20!")],
-            [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
-        ])
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-
-
-async def _notify_session_launch(session, new_joiner_id):
-    if not session or session["status"] != "IN_PROGRESS":
-        return
-    
-    tickets = database.get_tickets_for_session(session["id"])
-    user_ids = set(t["user_id"] for t in tickets)
-    
-    s_type = "Duel 1v1" if session["type"] == "DUEL" else f"Arena ({session.get('max_participants')} joueurs)"
-    msg = (
-        f"🚀 **{s_type} LANCÉ !** 🚀\n\n"
-        f"💰 Mise : `{session['gross_entry_fee']}` Coins\n"
-        f"🎯 Matchs : `{session['match_count']}`\n\n"
-        "Tous les tickets sont verrouillés. Le compte à rebours a commencé !"
+    await query.edit_message_text(
+        f"🏟️ <b>{league}</b>\n📊 Panier : <b>{len(cart_items)} match(s)</b>\n",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
     )
-    
-    for uid in user_ids:
-        try:
-            await telegram_app.bot.send_message(chat_id=uid, text=msg, parse_mode="Markdown")
-        except Exception as e:
-            logging.error(f"Erreur notification lancement session à {uid} : {e}")
-
-
-def _tickets_keyboard(sessions, user_id):
-    keyboard = []
-    for s in sessions:
-        if s["status"] == "WAITING": icon = "⚪"
-        elif s["status"] == "IN_PROGRESS": icon = "🟢"
-        else: icon = "🔵"
-        
-        t_label = "Arena" if s["type"] == "ARENA" else "Duel"
-        keyboard.append([InlineKeyboardButton(f"{icon} {t_label} {s['gross_entry_fee']} C ({s['match_count']}m)", callback_data=f"ticket_{s['id']}_mine")])
-    keyboard.append([InlineKeyboardButton("⬅️ Retour au Menu Principal", callback_data="menu_main")])
-    return InlineKeyboardMarkup(keyboard)
 
 
 async def show_ticket_detail(query, context, session_id, tab):
@@ -691,13 +591,12 @@ async def show_ticket_detail(query, context, session_id, tab):
     my_ticket = next((t for t in tickets if t["user_id"] == user_id), None)
     
     status_icon = {"WAITING": "⚪", "IN_PROGRESS": "🟢", "COMPLETED": "🔵"}.get(session['status'], "⚪")
-    text = f"⚔️ **Session {session['type']} — {session['gross_entry_fee']} Coins**\n{status_icon} Statut: {session['status']}\n\n"
+    text = f"⚔️ <b>Session {session['type']} — {session['gross_entry_fee']} Coins</b>\n{status_icon} Statut: {session['status']}\n\n"
     
     if tab == "mine":
         if my_ticket:
             match_ids = [str(p["match_id"]) for p in my_ticket["predictions"]]
-            # Use live scores lookup to ensure matches are retrievable and up-to-date
-            matches = await database.get_live_scores_for_matches(match_ids)
+            matches = {str(m["api_match_id"]): m for m in database.get_matches_by_ids(match_ids)}
             my_correct, total = 0, len(my_ticket["predictions"])
             for p in my_ticket["predictions"]:
                 m = matches.get(str(p["match_id"]))
@@ -709,77 +608,53 @@ async def show_ticket_detail(query, context, session_id, tab):
                         icon = "👍"
                         my_correct += 1
                     else: icon = "😢"
-                else:
-                    # If no final result, try to infer from live score
-                    hs = m.get("live_score_home")
-                    as_ = m.get("live_score_away")
-                    if hs is not None and as_ is not None:
-                        if hs > as_:
-                            leading = "HOME"
-                        elif as_ > hs:
-                            leading = "AWAY"
-                        else:
-                            leading = None
-                        if leading and leading == p.get("pick"):
-                            icon = "⚡ (Actuellement gagnant)"
-                # Échappement propre pour éviter l'erreur Markdown sur les noms d'équipes
-                home = str(m['home_team']).replace("_", "\\_").replace("*", "\\*")
-                away = str(m['away_team']).replace("_", "\\_").replace("*", "\\*")
+                
+                # Conversion sécurisée en HTML pour éviter tout conflit de caractères
+                home = str(m['home_team']).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                away = str(m['away_team']).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 text += f"{icon} {home} vs {away}\n"
-            text += f"\n🟢 **Mon Score : {my_correct}/{total}**"
+            text += f"\n🟢 <b>Mon Score : {my_correct}/{total}</b>"
             
             if session['status'] == 'COMPLETED':
                 winner_id = session.get('winner_id')
                 if winner_id == user_id:
-                    text += "\n\n✨ **VICTOIRE !** ✨"
+                    text += "\n\n✨ <b>VICTOIRE !</b> ✨"
                 elif winner_id is None:
-                    text += "\n\n🤝 **ÉGALITÉ PARFAITE**"
+                    text += "\n\n🤝 <b>ÉGALITÉ PARFAITE</b>"
                 else:
                     text += "\n\n😔 Vous avez perdu."
         else: 
             text += "Vous n'avez pas de ticket ici."
     
     elif tab == "opp":
-        text += "👥 **Progression des Adversaires :**\n\n"
+        text += "👥 <b>Progression des Adversaires :</b>\n\n"
         for t in tickets:
             if t["user_id"] == user_id: continue
             opp_user = database.get_user_by_id(t["user_id"])
             match_ids = [str(p["match_id"]) for p in t["predictions"]]
-            # Use live scores to compute a live "wins" count
-            matches = await database.get_live_scores_for_matches(match_ids)
-            total = len(t["predictions"])
-            current_wins = 0
-            finished = 0
+            matches = {str(m["api_match_id"]): m for m in database.get_matches_by_ids(match_ids)}
+            
+            finished, won, total = 0, 0, len(t["predictions"])
             for p in t["predictions"]:
                 m = matches.get(str(p["match_id"]))
                 if m and m.get("result"):
-                    finished += 1
-                    if m["result"] != "CANCEL" and m["result"] == p["pick"]:
-                        current_wins += 1
-                elif m:
-                    # live evaluation: if match has live scores, infer current leader
-                    hs = m.get("live_score_home")
-                    as_ = m.get("live_score_away")
-                    if hs is not None and as_ is not None:
-                        if hs > as_:
-                            leading = "HOME"
-                        elif as_ > hs:
-                            leading = "AWAY"
-                        else:
-                            leading = None
-                        if leading and leading == p.get("pick"):
-                            current_wins += 1
-            username_clean = str(opp_user.get('username', 'Joueur')).replace("_", "\\_")
-            text += f"👤 {username_clean} : `{current_wins}/{total}` — {current_wins}G / {total - current_wins}P\n"
+                    if m["result"] != "CANCEL":
+                        finished += 1
+                        if m["result"] == p["pick"]: won += 1
+            
+            username = str(opp_user.get('username', 'Joueur')).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            text += f"👤 {username} : <code>{finished}/{total}</code> — {won}G / {finished - won}P\n"
         
-        if len(tickets) <= 1: text += "\n⏳ *En attente d'adversaires...*"
+        if len(tickets) <= 1: text += "\n⏳ <i>En attente d'adversaires...</i>"
 
     btn_mine = InlineKeyboardButton("📍 Mon Ticket" + (" 🔹" if tab == "mine" else ""), callback_data=f"ticket_{session_id}_mine")
     btn_opp = InlineKeyboardButton("👥 Adversaires" + (" 🔹" if tab == "opp" else ""), callback_data=f"ticket_{session_id}_opp")
     
     keyboard = [[btn_mine, btn_opp]]
     keyboard.append([InlineKeyboardButton("⬅️ Retour Mes Tickets", callback_data="my_tickets")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
 
 
 telegram_app.add_handler(CommandHandler("start", start))
