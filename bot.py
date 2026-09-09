@@ -53,19 +53,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await propose_join_duel(update.message, user.id, session_id, context)
         return
 
-    db_user = database.get_or_create_user(user.id, user.username or user.first_name)
-    
-    try:
-        admin_msg = (
-            f"👤 **NOUVEL UTILISATEUR INSCRIT**\n\n"
-            f"Nom : {db_user['username']}\n"
-            f"🆔 Code Joueur : `{db_user['player_code']}`\n"
-            f"Telegram ID : `{user.id}`"
-        )
-        await telegram_app.bot.send_message(chat_id=config.ADMIN_TELEGRAM_ID, text=admin_msg, parse_mode="Markdown")
-    except Exception as e:
-        logging.error(f"Erreur envoi notif admin inscription : {e}")
-    
+    # Check if the user already exists to avoid notifying admin on every /start
+    existing_user = database.get_user_by_id(user.id)
+    if not existing_user:
+        db_user = database.get_or_create_user(user.id, user.username or user.first_name)
+        try:
+            admin_msg = (
+                f"👤 **NOUVEL UTILISATEUR INSCRIT**\n\n"
+                f"Nom : {db_user['username']}\n"
+                f"🆔 Code Joueur : `{db_user['player_code']}`\n"
+                f"Telegram ID : `{user.id}`"
+            )
+            await telegram_app.bot.send_message(chat_id=config.ADMIN_TELEGRAM_ID, text=admin_msg, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Erreur envoi notif admin inscription : {e}")
+    else:
+        db_user = existing_user
+
     text = (
         f"👋 Bienvenue **{user.first_name}** sur **Clashsport** !\n\n"
         f"💰 **Votre Solde :** `{db_user['coins_balance']}` Coins\n\n"
@@ -319,7 +323,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]]),
             )
             return ConversationHandler.END
-        keyboard = [[InlineKeyboardButton(f"{'🏟️ Arena' if d['type'] == 'ARENA' else '⚔️ 1v1'} — {d['gross_entry_fee']} Coins ({d['match_count']} matchs)", callback_data=f"start_join_{d['id']}")] for d in duels]
+        keyboard = [[InlineKeyboardButton(f"{'🏟️ Arena' if d['type'] == 'ARENA' else '⚔️ 1v1'} — {d['gross_entry_fee']} Coins ({d['match_count']} matchs)", callback_data=f"start_join_{d['id']}") ] for d in duels]
         keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")])
         await query.edit_message_text("🔍 **Salons ouverts sur Clashsport :**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -332,7 +336,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         db_user = database.get_or_create_user(user_id, "")
         if db_user["coins_balance"] < session["gross_entry_fee"]:
-            await query.edit_message_text(f"❌ **Solde insuffisant !**\nIl vous faut `{session['gross_entry_fee']}` Coins.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]]))
+            await query.edit_message_text(f"❌ **Solde insuffisant !**\nIl vous faut `{session['gross_entry_fee']}` Coins.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]))
             return ConversationHandler.END
 
         database.clear_draft(user_id)
@@ -692,7 +696,8 @@ async def show_ticket_detail(query, context, session_id, tab):
     if tab == "mine":
         if my_ticket:
             match_ids = [str(p["match_id"]) for p in my_ticket["predictions"]]
-            matches = {str(m["api_match_id"]): m for m in database.get_matches_by_ids(match_ids)}
+            # Use live scores lookup to ensure matches are retrievable and up-to-date
+            matches = await database.get_live_scores_for_matches(match_ids)
             my_correct, total = 0, len(my_ticket["predictions"])
             for p in my_ticket["predictions"]:
                 m = matches.get(str(p["match_id"]))
@@ -704,7 +709,19 @@ async def show_ticket_detail(query, context, session_id, tab):
                         icon = "👍"
                         my_correct += 1
                     else: icon = "😢"
-                
+                else:
+                    # If no final result, try to infer from live score
+                    hs = m.get("live_score_home")
+                    as_ = m.get("live_score_away")
+                    if hs is not None and as_ is not None:
+                        if hs > as_:
+                            leading = "HOME"
+                        elif as_ > hs:
+                            leading = "AWAY"
+                        else:
+                            leading = None
+                        if leading and leading == p.get("pick"):
+                            icon = "⚡ (Actuellement gagnant)"
                 # Échappement propre pour éviter l'erreur Markdown sur les noms d'équipes
                 home = str(m['home_team']).replace("_", "\\_").replace("*", "\\*")
                 away = str(m['away_team']).replace("_", "\\_").replace("*", "\\*")
@@ -728,18 +745,32 @@ async def show_ticket_detail(query, context, session_id, tab):
             if t["user_id"] == user_id: continue
             opp_user = database.get_user_by_id(t["user_id"])
             match_ids = [str(p["match_id"]) for p in t["predictions"]]
-            matches = {str(m["api_match_id"]): m for m in database.get_matches_by_ids(match_ids)}
-            
-            finished, won, total = 0, 0, len(t["predictions"])
+            # Use live scores to compute a live "wins" count
+            matches = await database.get_live_scores_for_matches(match_ids)
+            total = len(t["predictions"])
+            current_wins = 0
+            finished = 0
             for p in t["predictions"]:
                 m = matches.get(str(p["match_id"]))
                 if m and m.get("result"):
-                    if m["result"] != "CANCEL":
-                        finished += 1
-                        if m["result"] == p["pick"]: won += 1
-            
+                    finished += 1
+                    if m["result"] != "CANCEL" and m["result"] == p["pick"]:
+                        current_wins += 1
+                elif m:
+                    # live evaluation: if match has live scores, infer current leader
+                    hs = m.get("live_score_home")
+                    as_ = m.get("live_score_away")
+                    if hs is not None and as_ is not None:
+                        if hs > as_:
+                            leading = "HOME"
+                        elif as_ > hs:
+                            leading = "AWAY"
+                        else:
+                            leading = None
+                        if leading and leading == p.get("pick"):
+                            current_wins += 1
             username_clean = str(opp_user.get('username', 'Joueur')).replace("_", "\\_")
-            text += f"👤 {username_clean} : `{finished}/{total}` — {won}G / {finished - won}P\n"
+            text += f"👤 {username_clean} : `{current_wins}/{total}` — {current_wins}G / {total - current_wins}P\n"
         
         if len(tickets) <= 1: text += "\n⏳ *En attente d'adversaires...*"
 
