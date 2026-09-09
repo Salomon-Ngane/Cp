@@ -35,6 +35,17 @@ def main_menu_keyboard():
         [InlineKeyboardButton("💳 Mon Compte", callback_data="menu_account")],
     ])
 
+def _tickets_keyboard(sessions, user_id):
+    keyboard = []
+    for session in sessions:
+        session_type = "🏟️ Arena" if session["type"] == "ARENA" else "⚔️ 1v1"
+        status_icon = {"WAITING": "⚪", "IN_PROGRESS": "🟢", "COMPLETED": "🔵"}.get(session["status"], "⚪")
+        btn_text = f"{session_type} — {session['gross_entry_fee']} Coins {status_icon}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"ticket_{session['id']}_mine")])
+    
+    keyboard.append([InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")])
+    return InlineKeyboardMarkup(keyboard)
+
 def is_admin(user_id: int) -> bool:
     return user_id == config.ADMIN_TELEGRAM_ID
 
@@ -323,7 +334,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]]),
             )
             return ConversationHandler.END
-        keyboard = [[InlineKeyboardButton(f"{'🏟️ Arena' if d['type'] == 'ARENA' else '⚔️ 1v1'} — {d['gross_entry_fee']} Coins ({d['match_count']} matchs)", callback_data=f"start_join_{d['id']}") ] for d in duels]
+        keyboard = [[InlineKeyboardButton(f"{'🏟️ Arena' if d['type'] == 'ARENA' else '⚔️ 1v1'} — {d['gross_entry_fee']} Coins ({d['match_count']} matchs)", callback_data=f"start_join_{d['id']}") for d in duels]]
         keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data="menu_duel")])
         await query.edit_message_text("🔍 **Salons ouverts sur Clashsport :**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
