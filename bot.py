@@ -353,8 +353,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("league_"):
         parts = data.split("_", 2)
         sport = parts[1]
-        league = parts[2]
-        await show_matches_for_league(query, user_id, league, sport)
+        league_idx = int(parts[2])
+        matches = database.get_matches_by_sport(sport)
+        leagues = sorted(list(set(m.get("league", "Général") for m in matches if m.get("league"))))
+        if league_idx < len(leagues):
+            target_league = leagues[league_idx]
+            await show_matches_for_league(query, user_id, target_league, sport)
         
     elif data.startswith("pick_"):
         _, m_id, pick = data.split("_")
@@ -506,16 +510,17 @@ async def show_leagues_for_sport(query, user_id, sport):
         keyboard.append([InlineKeyboardButton("✅ Voir mon panier", callback_data="review_ticket")])
     keyboard.append([InlineKeyboardButton("🔙 Changer de Sport", callback_data="select_sports")])
 
-    for league in leagues:
-        # Intégration du sport dans le callback pour la persistance de navigation
-        keyboard.append([InlineKeyboardButton(f"🏅 {league}", callback_data=f"league_{sport}_{league}")])
+    for idx, league in enumerate(leagues):
+        # Utilisation de l'index au lieu du nom brut dans le callback pour éviter les crashs avec '_'
+        keyboard.append([InlineKeyboardButton(f"🏅 {league}", callback_data=f"league_{sport}_{idx}")])
 
     keyboard.append([InlineKeyboardButton("❌ Annuler", callback_data="cancel_creation")])
     
+    sport_clean = sport.upper()
     if not leagues:
-        text = f"🏆 **Championnats — {sport.upper()}**\n\n⏳ Aucun match disponible pour le moment."
+        text = f"🏆 **Championnats — {sport_clean}**\n\n⏳ Aucun match disponible pour le moment."
     else:
-        text = f"🏆 **Championnats — {sport.upper()}**\n\nSélectionnez une compétition :"
+        text = f"🏆 **Championnats — {sport_clean}**\n\nSélectionnez une compétition :"
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -699,7 +704,11 @@ async def show_ticket_detail(query, context, session_id, tab):
                         icon = "👍"
                         my_correct += 1
                     else: icon = "😢"
-                text += f"{icon} {m['home_team']} vs {m['away_team']}\n"
+                
+                # Échappement propre pour éviter l'erreur Markdown sur les noms d'équipes
+                home = str(m['home_team']).replace("_", "\\_").replace("*", "\\*")
+                away = str(m['away_team']).replace("_", "\\_").replace("*", "\\*")
+                text += f"{icon} {home} vs {away}\n"
             text += f"\n🟢 **Mon Score : {my_correct}/{total}**"
             
             if session['status'] == 'COMPLETED':
@@ -729,9 +738,10 @@ async def show_ticket_detail(query, context, session_id, tab):
                         finished += 1
                         if m["result"] == p["pick"]: won += 1
             
-            text += f"👤 {opp_user.get('username', 'Joueur')} : `{finished}/{total}` — {won}G / {finished - won}P\n"
+            username_clean = str(opp_user.get('username', 'Joueur')).replace("_", "\\_")
+            text += f"👤 {username_clean} : `{finished}/{total}` — {won}G / {finished - won}P\n"
         
-        if len(tickets) <= 1: text += "⏳ *En attente d'adversaires...*"
+        if len(tickets) <= 1: text += "\n⏳ *En attente d'adversaires...*"
 
     btn_mine = InlineKeyboardButton("📍 Mon Ticket" + (" 🔹" if tab == "mine" else ""), callback_data=f"ticket_{session_id}_mine")
     btn_opp = InlineKeyboardButton("👥 Adversaires" + (" 🔹" if tab == "opp" else ""), callback_data=f"ticket_{session_id}_opp")
