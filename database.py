@@ -1,10 +1,23 @@
 import random
+import httpx
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 import config
 import odds_api
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+
+# --- SETTINGS & API QUOTA (NOUVEAU) ---
+
+def update_api_quota(quota_str: str):
+    if quota_str:
+        supabase.table("app_settings").upsert({"setting_key": "api_quota", "setting_value": str(quota_str)}).execute()
+
+def get_api_quota() -> str:
+    res = supabase.table("app_settings").select("setting_value").eq("setting_key", "api_quota").execute()
+    if res.data:
+        return res.data[0]["setting_value"]
+    return "Inconnu"
 
 # --- UTILISATEURS ---
 
@@ -44,7 +57,7 @@ def get_all_users():
     except Exception:
         return []
 
-# --- SERVICES ADMIN (GIVE / TAKE / STATS) ---
+# --- SERVICES ADMIN ---
 
 def admin_give_coins(telegram_id: int, amount: int):
     return credit_balance(telegram_id, amount)
@@ -130,46 +143,31 @@ def create_session(creator_id: int, session_type: str, gross_fee: int, match_cou
 def join_session(session_id: str, joiner_id: int, predictions: list):
     session = get_session(session_id)
     if not session or session["status"] != "WAITING":
-        return None, "Session fermée ou indisponible."
+        return None, "Session fermée."
 
     gross_fee = int(session["gross_entry_fee"])
     joiner = get_or_create_user(joiner_id, "")
-    
     if joiner["coins_balance"] < gross_fee:
         return None, "Solde insuffisant."
 
     tickets = get_tickets_for_session(session_id)
     if len(tickets) >= session.get("max_participants", 2):
-        return None, "L'arène ou le duel est déjà plein."
+        return None, "Plein."
 
     supabase.table("users").update({"coins_balance": int(joiner["coins_balance"]) - gross_fee}).eq("telegram_id", joiner_id).execute()
     save_ticket(session_id, joiner_id, predictions)
 
     if len(tickets) + 1 == session.get("max_participants", 2):
-        if session["type"] == "DUEL":
-            supabase.table("sessions").update({"opponent_id": joiner_id, "status": "IN_PROGRESS"}).eq("id", session_id).execute()
-        else:
-            supabase.table("sessions").update({"status": "IN_PROGRESS"}).eq("id", session_id).execute()
+        update_data = {"status": "IN_PROGRESS"}
+        if session["type"] == "DUEL": update_data["opponent_id"] = joiner_id
+        supabase.table("sessions").update(update_data).eq("id", session_id).execute()
         return get_session(session_id), "Succès"
     
-    return session, "En attente de joueurs"
+    return session, "En attente"
 
 def save_ticket(session_id: str, user_id: int, predictions: list):
-    formatted_predictions = []
-    for p in predictions:
-        formatted_predictions.append({
-            "match_id": str(p["match_id"]),
-            "pick": p["pick"],
-            "odds": float(p.get("odds", 1.0))
-        })
-
-    ticket_data = {
-        "session_id": session_id,
-        "user_id": user_id,
-        "predictions": formatted_predictions,
-        "status": "PENDING",
-    }
-    return supabase.table("tickets").insert(ticket_data).execute().data[0]
+    formatted = [{"match_id": str(p["match_id"]), "pick": p["pick"], "odds": float(p.get("odds", 1.0))} for p in predictions]
+    return supabase.table("tickets").insert({"session_id": session_id, "user_id": user_id, "predictions": formatted, "status": "PENDING"}).execute().data[0]
 
 def get_tickets_for_session(session_id: str) -> list:
     return supabase.table("tickets").select("*").eq("session_id", session_id).execute().data
@@ -180,14 +178,7 @@ def get_user_sessions(user_id: int, history_limit: int = 3) -> list:
     if not session_ids: return []
 
     active = supabase.table("sessions").select("*").in_("id", session_ids).in_("status", ["WAITING", "IN_PROGRESS"]).execute().data
-    completed = (
-        supabase.table("sessions").select("*")
-        .in_("id", session_ids)
-        .eq("status", "COMPLETED")
-        .order("created_at", desc=True)
-        .limit(history_limit)
-        .execute().data
-    )
+    completed = supabase.table("sessions").select("*").in_("id", session_ids).eq("status", "COMPLETED").order("created_at", desc=True).limit(history_limit).execute().data
     return active + completed
 
 def cancel_expired_sessions():
@@ -196,35 +187,25 @@ def cancel_expired_sessions():
     
     for session in expired:
         tickets = get_tickets_for_session(session["id"])
-        for t in tickets:
-            credit_balance(t["user_id"], session["gross_entry_fee"])
+        for t in tickets: credit_balance(t["user_id"], session["gross_entry_fee"])
         supabase.table("sessions").update({"status": "CANCELLED"}).eq("id", session["id"]).execute()
         supabase.table("tickets").update({"status": "CANCELLED"}).eq("session_id", session["id"]).execute()
 
 def find_resolvable_sessions(api_match_id) -> list:
     sessions = supabase.table("sessions").select("*").eq("status", "IN_PROGRESS").execute().data
-    if not sessions:
-        return []
-        
+    if not sessions: return []
+    
     session_ids = [s["id"] for s in sessions]
-    
     all_tickets = supabase.table("tickets").select("*").in_("session_id", session_ids).execute().data
-    
     tickets_by_session = {}
-    for t in all_tickets:
-        tickets_by_session.setdefault(t["session_id"], []).append(t)
+    for t in all_tickets: tickets_by_session.setdefault(t["session_id"], []).append(t)
 
-    target = str(api_match_id)
     resolvable = []
-
     for session in sessions:
         tickets = tickets_by_session.get(session["id"], [])
         all_match_ids = set()
-        for t in tickets:
-            all_match_ids.update(str(p["match_id"]) for p in t["predictions"])
-
-        if target not in all_match_ids:
-            continue
+        for t in tickets: all_match_ids.update(str(p["match_id"]) for p in t["predictions"])
+        if str(api_match_id) not in all_match_ids: continue
 
         matches = get_matches_by_ids(list(all_match_ids))
         if len(matches) == len(all_match_ids) and all(m.get("result") for m in matches):
@@ -237,20 +218,17 @@ def resolve_session(session_id: str):
     if not session or session["status"] != "IN_PROGRESS": return None
 
     tickets = get_tickets_for_session(session_id)
-    all_match_ids = set()
-    for t in tickets: all_match_ids.update(str(p["match_id"]) for p in t["predictions"])
+    all_match_ids = set(str(p["match_id"]) for t in tickets for p in t["predictions"])
     
     matches = get_matches_by_ids(list(all_match_ids))
     results_by_match = {str(m["api_match_id"]): m.get("result") for m in matches}
 
     scores = []
     for t in tickets:
-        correct = 0
-        valid_odds = 1.0
+        correct, valid_odds = 0, 1.0
         for p in t["predictions"]:
             match_res = results_by_match.get(str(p["match_id"]))
-            if match_res == "CANCEL":
-                continue
+            if match_res == "CANCEL": continue
             elif match_res == p["pick"]:
                 correct += 1
                 valid_odds *= float(p.get("odds", 1.0))
@@ -270,38 +248,26 @@ def resolve_session(session_id: str):
         else:
             credit_balance(scores[0]["user_id"], pot_total)
             outcomes["winner_id"] = scores[0]["user_id"]
-    
     elif session["type"] == "ARENA":
         if session.get("prize_mode") == "TOP_3" and len(scores) >= 3:
             payouts = [pot_total * 0.50, pot_total * 0.38, pot_total * 0.12]
             for i in range(3):
-                if scores[i]["correct"] > 0:
-                    credit_balance(scores[i]["user_id"], int(payouts[i]))
-                else:
-                    outcomes["notifications"].append({
-                        "user_id": scores[i]["user_id"],
-                        "text": "⚠️ Votre récompense a été redistribuée vers le fonds Don (❤️) pour cause d'absence de pronostics gagnants."
-                    })
+                if scores[i]["correct"] > 0: credit_balance(scores[i]["user_id"], int(payouts[i]))
             outcomes["winner_id"] = scores[0]["user_id"]
         else:
-            if scores[0]["correct"] > 0:
-                credit_balance(scores[0]["user_id"], pot_total)
-            else:
-                outcomes["notifications"].append({
-                    "user_id": scores[0]["user_id"],
-                    "text": "⚠️ La cagnotte a été redistribuée pour cause d'absence de pronostics gagnants."
-                })
+            if scores[0]["correct"] > 0: credit_balance(scores[0]["user_id"], pot_total)
             outcomes["winner_id"] = scores[0]["user_id"]
 
-    winner_val = outcomes.get("winner_id")
-    supabase.table("sessions").update({"status": "COMPLETED", "winner_id": winner_val}).eq("id", session_id).execute()
+    supabase.table("sessions").update({"status": "COMPLETED", "winner_id": outcomes.get("winner_id")}).eq("id", session_id).execute()
     supabase.table("tickets").update({"status": "RESOLVED"}).eq("session_id", session_id).execute()
-
     return outcomes
+
+# --- SYNCHRONISATION API & FETCH LIVE ---
 
 async def sync_matches_from_api_async():
     try:
         matches, quota, calls_used = await odds_api.sync_today_matches(config.ODDS_API_KEY)
+        update_api_quota(quota) # On sauvegarde le quota
         if not matches: return 0, "Aucun match."
         saved = 0
         for match in matches:
@@ -311,6 +277,50 @@ async def sync_matches_from_api_async():
             except Exception: pass
         return saved, f"Succès : {saved} matchs importés."
     except Exception as e: return 0, str(e)
+
+# (NOUVEAU) Fonction pour résoudre automatiquement une session en allant chercher les scores jusqu'à J-3
+async def fetch_and_update_scores_for_resolution(session_id: str):
+    tickets = get_tickets_for_session(session_id)
+    if not tickets: return False, "Aucun ticket trouvé dans cette session."
+    
+    match_ids = set(str(p["match_id"]) for t in tickets for p in t["predictions"])
+    matches = get_matches_by_ids(list(match_ids))
+    sports = set(m["sport"] for m in matches)
+    
+    quota = None
+    updated_count = 0
+    
+    async with httpx.AsyncClient() as client:
+        for sport in sports:
+            # Appel API avec daysFrom=3 pour couvrir les matchs terminés récemment
+            url = f"https://api.the-odds-api.com/v4/sports/{sport}/scores/?apiKey={config.ODDS_API_KEY}&daysFrom=3"
+            resp = await client.get(url, timeout=15)
+            
+            if resp.status_code == 200:
+                quota = resp.headers.get("x-requests-remaining", quota)
+                for event in resp.json():
+                    if str(event["id"]) in match_ids and event.get("completed"):
+                        scores = event.get("scores")
+                        home_score = away_score = 0
+                        if scores:
+                            for s in scores:
+                                # Le parseur sécurisé pour extraire le vainqueur
+                                try: score_val = int(s.get("score") or 0)
+                                except: score_val = 0
+                                
+                                if s.get("name") == event.get("home_team"): home_score = score_val
+                                elif s.get("name") == event.get("away_team"): away_score = score_val
+                        
+                        if home_score > away_score: res = "HOME"
+                        elif away_score > home_score: res = "AWAY"
+                        else: res = "DRAW"
+                        
+                        set_match_result(str(event["id"]), res)
+                        updated_count += 1
+                        
+    if quota: update_api_quota(quota)
+    return True, f"{updated_count} matchs terminés mis à jour."
+
 
 def get_weekly_leaderboard(limit: int = 10) -> list:
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
@@ -347,7 +357,6 @@ async def get_live_scores_for_matches(match_ids: list) -> dict:
             sports_to_refresh.add(m["sport"])
 
     if sports_to_refresh:
-        import httpx
         async with httpx.AsyncClient() as client:
             for sport in sports_to_refresh:
                 scores = await odds_api.fetch_live_scores(client, config.ODDS_API_KEY, sport)
@@ -363,7 +372,7 @@ async def get_live_scores_for_matches(match_ids: list) -> dict:
     return {str(m["api_match_id"]): m for m in matches}
 
 
-# --- GESTION DU PANIER PERSISTANT (NOUVEAU) ---
+# --- GESTION DU PANIER PERSISTANT ---
 
 def set_draft_settings(user_id: int, settings: dict):
     settings["user_id"] = user_id
@@ -379,19 +388,13 @@ def clear_draft(user_id: int):
 
 def toggle_cart_item(user_id: int, match_id: str, pick: str, odds: float):
     existing = supabase.table("cart").select("*").eq("user_id", user_id).eq("match_id", str(match_id)).execute()
-    
     if existing.data:
         if existing.data[0]["pick"] == pick:
             supabase.table("cart").delete().eq("user_id", user_id).eq("match_id", str(match_id)).execute()
         else:
             supabase.table("cart").update({"pick": pick, "odds": float(odds)}).eq("user_id", user_id).eq("match_id", str(match_id)).execute()
     else:
-        supabase.table("cart").insert({
-            "user_id": user_id, 
-            "match_id": str(match_id), 
-            "pick": pick, 
-            "odds": float(odds)
-        }).execute()
+        supabase.table("cart").insert({"user_id": user_id, "match_id": str(match_id), "pick": pick, "odds": float(odds)}).execute()
 
 def get_cart(user_id: int):
     return supabase.table("cart").select("*").eq("user_id", user_id).execute().data
