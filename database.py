@@ -9,6 +9,14 @@ supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 
 # --- SETTINGS & API QUOTA ---
 
+def update_api_quota(quota_str: str):
+    """Sauvegarde le quota dans la base de données de manière sécurisée."""
+    if quota_str:
+        try:
+            supabase.table("app_settings").upsert({"setting_key": "api_quota", "setting_value": str(quota_str)}).execute()
+        except Exception as e:
+            pass # Ignore silencieusement si la table n'est pas encore créée
+
 def get_api_quota() -> str:
     """Récupère le quota API de manière sécurisée sans jamais faire crasher le bot."""
     try:
@@ -18,6 +26,7 @@ def get_api_quota() -> str:
     except Exception as e:
         pass # Si la table n'existe pas ou qu'il y a une erreur réseau, on ignore silencieusement
     return "Inconnu"
+
     
 # --- UTILISATEURS ---
 
