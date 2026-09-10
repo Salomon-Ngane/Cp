@@ -254,23 +254,26 @@ async def admin_take(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur : {str(e)}")
 
-# (MISE A JOUR) Commande stats incluant le Quota API
+# (MISE A JOUR) Commande stats incluant le Quota API sécurisé
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
+    
+    # Récupération sécurisée
     stats = database.get_detailed_stats()
     quota = database.get_api_quota()
     
     text = (
         "📊 **STATISTIQUES DE LA PLATEFORME**\n\n"
-        f"👥 Joueurs inscrits : `{stats['total_users']}`\n"
-        f"💰 Coins en circulation : `{stats['total_coins']}`\n"
-        f"🎟️ Tickets créés : `{stats['total_tickets']}`\n"
-        f"🟡 Salons en attente : `{stats['waiting_sessions']}`\n"
-        f"🔵 Duels / Arenas en cours : `{stats['active_sessions']}`\n"
-        f"🏁 Sessions terminées : `{stats['completed_sessions']}`\n\n"
+        f"👥 Joueurs inscrits : `{stats.get('total_users', 'N/A')}`\n"
+        f"💰 Coins en circulation : `{stats.get('total_coins', 'N/A')}`\n"
+        f"🎟️ Tickets créés : `{stats.get('total_tickets', 'N/A')}`\n"
+        f"🟡 Salons en attente : `{stats.get('waiting_sessions', 'N/A')}`\n"
+        f"🔵 Duels / Arenas en cours : `{stats.get('active_sessions', 'N/A')}`\n"
+        f"🏁 Sessions terminées : `{stats.get('completed_sessions', 'N/A')}`\n\n"
         f"🔌 **Quota The Odds API restant :** `{quota}`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
+
 
 async def admin_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
