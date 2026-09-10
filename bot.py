@@ -103,7 +103,7 @@ async def user_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not sessions:
         await update.message.reply_text("📭 Aucun duel en cours à suivre.", reply_markup=main_menu_keyboard())
         return
-    await update.message.reply_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]))
+    await update.message.reply_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_mai")]]))
 
 async def propose_join_duel(message, user_id, session_id, context):
     session = database.get_session(session_id)
@@ -169,6 +169,43 @@ async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ Résultat enregistré. 🏁 {resolved_count} session(s) tranchée(s).")
 
+# (NOUVEAU) Commande de résolution automatique de session
+async def admin_resolve_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text("❌ Usage : /resolve_session [id_de_la_session]")
+        return
+    
+    session_id = context.args[0]
+    session = database.get_session(session_id)
+    if not session:
+        await update.message.reply_text("❌ Session introuvable dans la base de données.")
+        return
+    
+    if session["status"] != "IN_PROGRESS":
+        await update.message.reply_text(f"⚠️ Impossible : La session est actuellement '{session['status']}'. Elle doit être 'IN_PROGRESS'.")
+        return
+
+    m = await update.message.reply_text("⏳ Récupération des scores finaux depuis The Odds API (jusqu'à J-3)...")
+    success, msg = await database.fetch_and_update_scores_for_resolution(session_id)
+    
+    # On tente de trancher la session
+    outcome = database.resolve_session(session_id)
+    if outcome:
+        # Envoi des notifications de résultats
+        for notif in outcome.get("notifications", []):
+            try: await context.bot.send_message(chat_id=notif["user_id"], text=notif["text"])
+            except Exception: pass
+            
+        if outcome.get("is_draw_refund"):
+            for s_score in outcome.get("scores", []):
+                try: await context.bot.send_message(chat_id=s_score["user_id"], text="🤝 Égalité parfaite ! Votre mise a été remboursée.")
+                except Exception: pass
+                
+        await m.edit_text(f"✅ Session tranchée avec succès !\nℹ️ Détails : {msg}\n💰 Cagnotte distribuée.")
+    else:
+        await m.edit_text(f"⚠️ {msg}\n\nLa session ne peut pas encore être tranchée car tous les matchs ne sont pas terminés (ou les scores sont indisponibles).")
+
 async def admin_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     args = context.args
@@ -217,9 +254,12 @@ async def admin_take(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur : {str(e)}")
 
+# (MISE A JOUR) Commande stats incluant le Quota API
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     stats = database.get_detailed_stats()
+    quota = database.get_api_quota()
+    
     text = (
         "📊 **STATISTIQUES DE LA PLATEFORME**\n\n"
         f"👥 Joueurs inscrits : `{stats['total_users']}`\n"
@@ -227,7 +267,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎟️ Tickets créés : `{stats['total_tickets']}`\n"
         f"🟡 Salons en attente : `{stats['waiting_sessions']}`\n"
         f"🔵 Duels / Arenas en cours : `{stats['active_sessions']}`\n"
-        f"🏁 Sessions terminées : `{stats['completed_sessions']}`\n"
+        f"🏁 Sessions terminées : `{stats['completed_sessions']}`\n\n"
+        f"🔌 **Quota The Odds API restant :** `{quota}`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -423,7 +464,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not sessions:
             await query.edit_message_text("📭 Aucun duel en cours à suivre.", reply_markup=main_menu_keyboard())
             return ConversationHandler.END
-        await query.edit_message_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]))
+        await query.edit_message_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_m")]]))
 
     elif data == "menu_account":
         db_user = database.get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
@@ -493,7 +534,7 @@ stake_conv_handler = ConversationHandler(
 async def init_draft_duel(query, user_id, stake):
     db_user = database.get_or_create_user(user_id, "")
     if db_user["coins_balance"] < stake:
-        await query.edit_message_text(f"❌ **Solde insuffisant !**\nMise requise : `{stake}` Coins.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]))
+        await query.edit_message_text(f"❌ **Solde insuffisant !**\nMise requise : `{stake}` Coins.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_ma")]]))
         return
     
     settings = database.get_draft_settings(user_id) or {}
@@ -674,6 +715,7 @@ telegram_app.add_handler(CommandHandler("tickets", user_tickets))
 telegram_app.add_handler(CommandHandler("live", user_live))
 
 telegram_app.add_handler(CommandHandler("resolve", admin_resolve))
+telegram_app.add_handler(CommandHandler("resolve_session", admin_resolve_session))  # <-- Ajouté
 telegram_app.add_handler(CommandHandler("give", admin_give))
 telegram_app.add_handler(CommandHandler("take", admin_take))
 telegram_app.add_handler(CommandHandler("stats", admin_stats))
