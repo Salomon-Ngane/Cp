@@ -7,18 +7,18 @@ import odds_api
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 
-# --- SETTINGS & API QUOTA (NOUVEAU) ---
-
-def update_api_quota(quota_str: str):
-    if quota_str:
-        supabase.table("app_settings").upsert({"setting_key": "api_quota", "setting_value": str(quota_str)}).execute()
+# --- SETTINGS & API QUOTA ---
 
 def get_api_quota() -> str:
-    res = supabase.table("app_settings").select("setting_value").eq("setting_key", "api_quota").execute()
-    if res.data:
-        return res.data[0]["setting_value"]
+    """Récupère le quota API de manière sécurisée sans jamais faire crasher le bot."""
+    try:
+        res = supabase.table("app_settings").select("setting_value").eq("setting_key", "api_quota").execute()
+        if res.data and res.data[0].get("setting_value"):
+            return str(res.data[0]["setting_value"])
+    except Exception as e:
+        pass # Si la table n'existe pas ou qu'il y a une erreur réseau, on ignore silencieusement
     return "Inconnu"
-
+    
 # --- UTILISATEURS ---
 
 def get_or_create_user(telegram_id: int, username: str, referred_by: int = None):
@@ -59,32 +59,36 @@ def get_all_users():
 
 # --- SERVICES ADMIN ---
 
-def admin_give_coins(telegram_id: int, amount: int):
-    return credit_balance(telegram_id, amount)
-
-def admin_take_coins(telegram_id: int, amount: int):
-    user = get_user_by_id(telegram_id)
-    if not user: return None
-    new_balance = max(0, int(user["coins_balance"]) - amount)
-    supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", telegram_id).execute()
-    return new_balance
-
 def get_detailed_stats():
-    users = supabase.table("users").select("coins_balance").execute().data
-    sessions = supabase.table("sessions").select("status").execute().data
-    tickets = supabase.table("tickets").select("session_id").execute().data
-    
-    total_coins = sum(u.get("coins_balance", 0) for u in users)
-    completed_sessions = [s for s in sessions if s.get("status") == "COMPLETED"]
-    
-    return {
-        "total_users": len(users),
-        "total_coins": total_coins,
-        "total_tickets": len(tickets),
-        "waiting_sessions": len([s for s in sessions if s.get("status") == "WAITING"]),
-        "active_sessions": len([s for s in sessions if s.get("status") == "IN_PROGRESS"]),
-        "completed_sessions": len(completed_sessions),
-    }
+    """Récupère les statistiques globales de façon blindée."""
+    try:
+        # Le "or []" garantit qu'on a toujours une liste, même si execute().data renvoie None
+        users = supabase.table("users").select("coins_balance").execute().data or []
+        sessions = supabase.table("sessions").select("status").execute().data or []
+        tickets = supabase.table("tickets").select("session_id").execute().data or []
+        
+        # Sécurisation : int(u.get("coins_balance") or 0) évite le crash si la valeur est 'null' (None)
+        total_coins = sum(int(u.get("coins_balance") or 0) for u in users)
+        completed_sessions = [s for s in sessions if s.get("status") == "COMPLETED"]
+        
+        return {
+            "total_users": len(users),
+            "total_coins": total_coins,
+            "total_tickets": len(tickets),
+            "waiting_sessions": len([s for s in sessions if s.get("status") == "WAITING"]),
+            "active_sessions": len([s for s in sessions if s.get("status") == "IN_PROGRESS"]),
+            "completed_sessions": len(completed_sessions),
+        }
+    except Exception as e:
+        # En cas de problème critique avec la base de données, on renvoie une structure valide
+        return {
+            "total_users": "Erreur DB",
+            "total_coins": "Erreur DB",
+            "total_tickets": "Erreur DB",
+            "waiting_sessions": "Erreur DB",
+            "active_sessions": "Erreur DB",
+            "completed_sessions": "Erreur DB",
+        }
 
 # --- MATCHS ---
 
