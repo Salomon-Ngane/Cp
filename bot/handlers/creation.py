@@ -32,7 +32,8 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         update_draft_settings(user_id, {"session_type": stype})
         if stype == "DUEL":
             update_draft_settings(user_id, {"max_participants": 2, "prize_mode": "WINNER_TAKES_ALL"})
-            await _ask_match_count_text(query)
+            # On passe directement au choix de la mise (le nombre de matchs se déduira du panier)
+            await _ask_entry_fee(query)
         else:
             text = "🏟️ **Configuration Arena**\n\nCombien de joueurs maximum pour ce salon ?"
             keyboard = InlineKeyboardMarkup([
@@ -55,7 +56,8 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
     elif data.startswith("arena_prize_"):
         mode = "TOP_3" if data.split("_")[2] == "TOP3" else "WINNER_TAKES_ALL"
         update_draft_settings(user_id, {"prize_mode": mode})
-        await _ask_match_count_text(query)
+        # Après configuration Arena, on passe directement au choix de la mise
+        await _ask_entry_fee(query)
 
     elif data.startswith("fee_"):
         fee = int(data.split("_")[1])
@@ -69,13 +71,19 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
     elif data.startswith("bet_"):
         _, mid, pick, odds = data.split("_")
         draft = get_draft_settings(user_id)
-        target_count = draft.get("match_count", 1)
+        joining_sid = draft.get("joining_session_id")
         
-        success = toggle_cart_item(user_id, mid, pick, float(odds), max_count=target_count)
-        
-        if not success:
-            await query.answer("⚠️ Panier complet ! Désélectionnez un match ou validez votre ticket.", show_alert=True)
-            return
+        # Si on rejoint un salon existant, on respecte STRICTEMENT le nombre de matchs requis par le créateur
+        if joining_sid:
+            session = get_session(joining_sid)
+            target_count = session.get("match_count", 1) if session else 1
+            success = toggle_cart_item(user_id, mid, pick, float(odds), max_count=target_count)
+            if not success:
+                await query.answer(f"⚠️ Ce salon exige exactement {target_count} pronostic(s).", show_alert=True)
+                return
+        else:
+            # Si on crée, pas de limite stricte en amont, on ajoute/retire librement du panier
+            toggle_cart_item(user_id, mid, pick, float(odds), max_count=None)
             
         await _refresh_match_selection_view(query, user_id)
 
@@ -114,38 +122,14 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
             await query.edit_message_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=keyboard, parse_mode="Markdown")
 
 
-async def _ask_match_count_text(query):
-    # On mémorise dans le draft qu'on attend la saisie du nombre de matchs
-    update_draft_settings(query.from_user.id, {"awaiting_match_count": True})
-    text = "🎯 **Configuration du Salon**\n\nEntrez manuellement le **nombre de matchs** que vous souhaitez mettre sur votre ticket (ex: 1, 2, 4...) :"
-    await query.edit_message_text(text, parse_mode="Markdown")
-
-
-async def handle_text_match_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    draft = get_draft_settings(user_id)
-    
-    # Si le bot n'attend pas de nombre de matchs pour cet utilisateur, on ignore
-    if not draft.get("awaiting_match_count"):
-        return
-
-    text_input = update.message.text.strip()
-    if not text_input.isdigit() or int(text_input) <= 0:
-        await update.message.reply_text("❌ Veuillez entrer un nombre valide supérieur à 0.")
-        return
-
-    cnt = int(text_input)
-    # On enregistre le nombre et on désactive l'attente
-    update_draft_settings(user_id, {"match_count": cnt, "awaiting_match_count": False})
-    
-    # On passe à l'étape suivante : choix de la mise
-    text = f"💰 **Mise d'entrée (Coins)**\n\nNombre de matchs enregistré : `{cnt}`\nChoisissez le montant de la mise pour ce salon :"
+async def _ask_entry_fee(query):
+    text = "💰 **Mise d'entrée (Coins)**\n\nChoisissez le montant de la mise pour ce salon :"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("100 Coins", callback_data="fee_100"), InlineKeyboardButton("500 Coins", callback_data="fee_500")],
         [InlineKeyboardButton("1000 Coins", callback_data="fee_1000"), InlineKeyboardButton("5000 Coins", callback_data="fee_5000")],
-        [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
+        [InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]
     ])
-    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def _show_sports_selection(query):
@@ -168,9 +152,19 @@ async def _show_matches_for_sport(query, sport):
     
     draft = get_draft_settings(user_id)
     cart = {str(item["match_id"]): item["pick"] for item in get_cart(user_id)}
-    target_count = draft.get("match_count", 1)
+    
+    joining_sid = draft.get("joining_session_id")
+    if joining_sid:
+        session = get_session(joining_sid)
+        target_count = session.get("match_count", 1) if session else 1
+        header_text = f"⚽ **Matchs disponibles ({sport})**\nSélectionnez vos pronostics ({len(cart)}/{target_count}) :\n\n"
+        can_validate = (len(cart) == target_count)
+    else:
+        # En mode création, le nombre de matchs s'adapte dynamiquement au panier (minimum 1 match)
+        header_text = f"⚽ **Matchs disponibles ({sport})**\nMatchs sélectionnés : `{len(cart)}` (Cliquez sur Valider quand vous avez fini)\n\n"
+        can_validate = (len(cart) >= 1)
 
-    text = f"⚽ **Matchs disponibles ({sport})**\nSélectionnez vos pronostics ({len(cart)}/{target_count}) :\n\n"
+    text = header_text
     keyboard = []
     
     for m in matches:
@@ -191,7 +185,7 @@ async def _show_matches_for_sport(query, sport):
             row.append(InlineKeyboardButton(f"{prefix}{label} ({odd})", callback_data=f"bet_{mid}_{pick}_{odd}"))
         keyboard.append(row)
 
-    if len(cart) == target_count:
+    if can_validate:
         keyboard.append([InlineKeyboardButton("🚀 Valider mon Ticket", callback_data="validate_ticket")])
     keyboard.append([InlineKeyboardButton("⬅️ Changer de sport", callback_data="sport_Soccer")])
 
@@ -209,11 +203,12 @@ async def _process_ticket_creation(query, user_id, context):
     cart = get_cart(user_id)
     joining_session_id = draft.get("joining_session_id")
 
-    if len(cart) != draft.get("match_count", 1):
-        await query.answer("Nombre de pronostics invalide !", show_alert=True)
+    if not cart:
+        await query.answer("Votre panier est vide !", show_alert=True)
         return
 
     predictions = [{"match_id": item["match_id"], "pick": item["pick"], "odds": item["odds"]} for item in cart]
+    match_count = len(predictions) # Le nombre de matchs est calé dynamiquement sur le panier !
 
     if joining_session_id:
         session, msg = join_session(joining_session_id, user_id, predictions)
@@ -234,11 +229,12 @@ async def _process_ticket_creation(query, user_id, context):
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
+    # Création du salon avec le match_count calculé à partir du panier
     session, msg = create_session(
         creator_id=user_id,
         session_type=draft.get("session_type", "DUEL"),
         gross_fee=draft.get("gross_fee", 100),
-        match_count=draft.get("match_count", 1),
+        match_count=match_count,
         max_participants=draft.get("max_participants", 2),
         prize_mode=draft.get("prize_mode", "WINNER_TAKES_ALL"),
         predictions=predictions
