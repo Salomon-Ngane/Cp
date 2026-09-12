@@ -27,7 +27,6 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
     data = query.data
     user_id = query.from_user.id
 
-    # Boutons purement visuels (étiquettes de compétitions/matchs)
     if data == "ignore":
         return
 
@@ -80,7 +79,11 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
 
     elif data.startswith("sport_"):
         sport = data.split("_")[1]
-        await _show_matches_for_sport(query, sport)
+        await _show_competitions_for_sport(query, sport)
+
+    elif data.startswith("comp_"):
+        comp_prefix = data.split("_", 1)[1]
+        await _show_matches_for_comp(query, comp_prefix)
 
     elif data == "back_to_sports":
         await _show_sports_selection(query)
@@ -100,7 +103,14 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         else:
             toggle_cart_item(user_id, mid, pick, float(odds), max_count=None)
             
-        await _refresh_match_selection_view(query, user_id)
+        # Rafraîchir l'écran actuel de la compétition
+        matches_db = get_matches_by_ids([mid])
+        if matches_db:
+            m = matches_db[0]
+            comp = m.get("sport_title") or m.get("sport") or "Compétition"
+            await _show_matches_for_comp(query, comp[:40])
+        else:
+            await _show_competitions_for_sport(query, draft.get("current_sport", "Soccer"))
 
     elif data == "validate_ticket":
         await _process_ticket_creation(query, user_id, context)
@@ -157,7 +167,8 @@ async def _show_sports_selection(query):
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-async def _show_matches_for_sport(query, sport):
+async def _show_competitions_for_sport(query, sport):
+    """NOUVEL ÉCRAN : Liste uniquement les compétitions disponibles pour le sport sélectionné."""
     user_id = query.from_user.id
     update_draft_settings(user_id, {"current_sport": sport})
     matches = get_matches_by_sport(sport)
@@ -166,82 +177,96 @@ async def _show_matches_for_sport(query, sport):
         await query.answer("Aucun match disponible pour ce sport aujourd'hui.", show_alert=True)
         return
     
+    # Extraire les compétitions uniques
+    competitions = set()
+    for m in matches:
+        comp = m.get("sport_title") or m.get("sport") or "Compétition"
+        competitions.add(comp)
+
+    text = f"🏆 **Compétitions ({sport})**\n\nChoisissez une ligue ou un tournoi :"
+    keyboard = []
+    
+    for comp in sorted(competitions):
+        safe_comp = comp[:40] # Sécurité pour ne pas dépasser la limite de 64 bytes de Telegram
+        keyboard.append([InlineKeyboardButton(f"🏆 {comp}", callback_data=f"comp_{safe_comp}")])
+
+    keyboard.append([InlineKeyboardButton("⬅️ Retour aux sports", callback_data="back_to_sports")])
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def _show_matches_for_comp(query, comp_prefix):
+    """NOUVEL ÉCRAN : Affiche les matchs d'une compétition spécifique."""
+    user_id = query.from_user.id
     draft = get_draft_settings(user_id)
+    sport = draft.get("current_sport", "Soccer")
+    
+    matches = get_matches_by_sport(sport)
+    comp_matches = []
+    
+    # Filtrer les matchs appartenant à la compétition cliquée
+    for m in (matches or []):
+        comp = m.get("sport_title") or m.get("sport") or "Compétition"
+        if comp.startswith(comp_prefix):
+            comp_matches.append(m)
+
+    if not comp_matches:
+        await query.answer("Aucun match disponible pour cette compétition.", show_alert=True)
+        return
+        
     cart = {str(item["match_id"]): item["pick"] for item in get_cart(user_id)}
     
     joining_sid = draft.get("joining_session_id")
     if joining_sid:
         session = get_session(joining_sid)
         target_count = session.get("match_count", 1) if session else 1
-        header_text = f"🎯 **Sélection ({sport})**\nPronostics ({len(cart)}/{target_count}) :\n"
+        header_text = f"🎯 <b>{comp_matches[0].get('sport_title', sport)}</b>\nPronostics ({len(cart)}/{target_count}) :\n\n"
         can_validate = (len(cart) == target_count)
     else:
-        header_text = f"🎯 **Sélection ({sport})**\nMatchs dans le panier : `{len(cart)}` (Validez quand vous avez fini)\n"
+        header_text = f"🎯 <b>{comp_matches[0].get('sport_title', sport)}</b>\nMatchs sélectionnés : <code>{len(cart)}</code>\n\n"
         can_validate = (len(cart) >= 1)
-
-    # Groupement des matchs par compétition
-    matches_by_comp = {}
-    for m in matches:
-        # On utilise le sport_title s'il existe (ex: "Ligue 1"), sinon le nom du sport
-        comp = m.get("sport_title") or m.get("sport") or "Compétition"
-        matches_by_comp.setdefault(comp, []).append(m)
 
     keyboard = []
     button_count = 0
-
-    for comp, comp_matches in matches_by_comp.items():
-        if button_count >= 85: # Sécurité : Garde de la place pour Valider et Retour (100 max)
+    
+    for m in comp_matches:
+        if button_count >= 85: # Garde la place pour Valider et Retour
             break
             
-        # 1. Étiquette de la compétition
-        keyboard.append([InlineKeyboardButton(f"🏆 {comp}", callback_data="ignore")])
-        button_count += 1
-        
-        for m in comp_matches:
-            if button_count >= 85:
-                break
-                
-            try:
-                mid = str(m["api_match_id"])
-                home = str(m.get("home_team", "Équipe A"))
-                away = str(m.get("away_team", "Équipe B"))
-                
-                odds_h = _safe_float(m.get("odds_home"), 1.9)
-                odds_d = _safe_float(m.get("odds_draw"), 0.0)
-                odds_a = _safe_float(m.get("odds_away"), 1.9)
+        try:
+            mid = str(m["api_match_id"])
+            home = str(m.get("home_team", "Équipe A"))
+            away = str(m.get("away_team", "Équipe B"))
+            
+            odds_h = _safe_float(m.get("odds_home"), 1.9)
+            odds_d = _safe_float(m.get("odds_draw"), 0.0)
+            odds_a = _safe_float(m.get("odds_away"), 1.9)
 
-                # 2. Étiquette du Match
-                keyboard.append([InlineKeyboardButton(f"⚽ {home} - {away}", callback_data="ignore")])
-                button_count += 1
+            keyboard.append([InlineKeyboardButton(f"⚽ {home} - {away}", callback_data="ignore")])
+            button_count += 1
+            
+            row = []
+            for label, pick, odd in [("1", "HOME", odds_h), ("N", "DRAW", odds_d), ("2", "AWAY", odds_a)]:
+                if odd <= 1.0: 
+                    continue
+                is_selected = (cart.get(mid) == pick)
+                prefix = "✅ " if is_selected else ""
+                row.append(InlineKeyboardButton(f"{prefix}{label} ({odd})", callback_data=f"bet_{mid}_{pick}_{odd}"))
+            
+            if row:
+                keyboard.append(row)
+                button_count += len(row)
                 
-                # 3. Ligne des Pronostics
-                row = []
-                for label, pick, odd in [("1", "HOME", odds_h), ("N", "DRAW", odds_d), ("2", "AWAY", odds_a)]:
-                    if odd <= 1.0: 
-                        continue
-                    is_selected = (cart.get(mid) == pick)
-                    prefix = "✅ " if is_selected else ""
-                    row.append(InlineKeyboardButton(f"{prefix}{label} ({odd})", callback_data=f"bet_{mid}_{pick}_{odd}"))
-                
-                if row:
-                    keyboard.append(row)
-                    button_count += len(row)
-                    
-            except Exception as e:
-                logger.error(f"Erreur d'affichage du match {m.get('api_match_id')}: {e}")
-                continue
+        except Exception as e:
+            logger.error(f"Erreur d'affichage du match {m.get('api_match_id')}: {e}")
+            continue
 
     if can_validate:
         keyboard.append([InlineKeyboardButton("🚀 Valider mon Ticket", callback_data="validate_ticket")])
-    keyboard.append([InlineKeyboardButton("⬅️ Changer de sport", callback_data="back_to_sports")])
+    # Bouton retour qui pointe dynamiquement vers la liste des compétitions de ce sport
+    keyboard.append([InlineKeyboardButton("⬅️ Retour aux compétitions", callback_data=f"sport_{sport}")])
 
-    await query.edit_message_text(header_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-
-async def _refresh_match_selection_view(query, user_id):
-    draft = get_draft_settings(user_id)
-    sport = draft.get("current_sport", "Soccer")
-    await _show_matches_for_sport(query, sport)
+    await query.edit_message_text(header_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
 async def _process_ticket_creation(query, user_id, context):
