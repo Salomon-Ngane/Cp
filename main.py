@@ -33,6 +33,12 @@ telegram_app.add_handler(CommandHandler("sweep", admin_sweep))
 telegram_app.add_handler(CommandHandler("alert", admin_alert))
 telegram_app.add_handler(CommandHandler("resolve", admin_resolve))
 telegram_app.add_handler(CommandHandler("resolve_session", admin_resolve_session))
+from telegram.ext import MessageHandler, filters
+from bot.handlers.creation import handle_text_match_count
+
+# ... (dans votre fonction main ou initialisation)
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_match_count))
+
 
 # Routeur global pour tous les boutons tactiles (Callbacks)
 async def global_callback_router(update: Update, context):
