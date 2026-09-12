@@ -1,4 +1,5 @@
 import math
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 import config
@@ -8,6 +9,17 @@ from database.sessions import get_matches_by_sport, get_matches_by_ids, create_s
 from database.users import get_user_by_id
 from bot.ui import main_menu_keyboard
 from bot.handlers.tickets_view import show_ticket_detail
+
+logger = logging.getLogger(__name__)
+
+def _safe_float(val, default=0.0) -> float:
+    """Convertit une valeur en float en toute sécurité, même si la valeur est None (NULL SQL)."""
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
 
 async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -166,22 +178,31 @@ async def _show_matches_for_sport(query, sport):
     keyboard = []
     
     for m in matches:
-        mid = str(m["api_match_id"])
-        home = str(m["home_team"])
-        away = str(m["away_team"])
-        odds_h = float(m.get("odds_home", 1.9))
-        odds_d = float(m.get("odds_draw", 3.0))
-        odds_a = float(m.get("odds_away", 1.9))
+        try:
+            mid = str(m["api_match_id"])
+            home = str(m.get("home_team", "Équipe A"))
+            away = str(m.get("away_team", "Équipe B"))
+            
+            # SÉCURISATION DES COTES : _safe_float empêche tout crash sur les valeurs NULL / None
+            odds_h = _safe_float(m.get("odds_home"), 1.9)
+            odds_d = _safe_float(m.get("odds_draw"), 0.0)  # 0.0 pour masquer le Nul au Tennis/Basket
+            odds_a = _safe_float(m.get("odds_away"), 1.9)
 
-        text += f"🔹 <b>{home} vs {away}</b>\n"
-        
-        row = []
-        for label, pick, odd in [("1", "HOME", odds_h), ("N", "DRAW", odds_d), ("2", "AWAY", odds_a)]:
-            if odd <= 1.0: continue
-            is_selected = (cart.get(mid) == pick)
-            prefix = "✅ " if is_selected else ""
-            row.append(InlineKeyboardButton(f"{prefix}{label} ({odd})", callback_data=f"bet_{mid}_{pick}_{odd}"))
-        keyboard.append(row)
+            text += f"🔹 <b>{home} vs {away}</b>\n"
+            
+            row = []
+            for label, pick, odd in [("1", "HOME", odds_h), ("N", "DRAW", odds_d), ("2", "AWAY", odds_a)]:
+                if odd <= 1.0: 
+                    continue  # Masque automatiquement le match nul pour le Tennis/Basket (odd = 0.0)
+                is_selected = (cart.get(mid) == pick)
+                prefix = "✅ " if is_selected else ""
+                row.append(InlineKeyboardButton(f"{prefix}{label} ({odd})", callback_data=f"bet_{mid}_{pick}_{odd}"))
+            
+            if row:
+                keyboard.append(row)
+        except Exception as e:
+            logger.error(f"Erreur d'affichage du match {m.get('api_match_id')}: {e}")
+            continue
 
     if can_validate:
         keyboard.append([InlineKeyboardButton("🚀 Valider mon Ticket", callback_data="validate_ticket")])
