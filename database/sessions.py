@@ -64,6 +64,9 @@ def join_session(session_id: str, joiner_id: int, predictions: list):
     if not session or session["status"] != "WAITING":
         return None, "Session fermée ou introuvable."
 
+    # ⚠️ NE PAS RETIRER : équité du duel — ce contrôle a déjà disparu 3 fois lors de
+    # réécritures précédentes. Sans lui, un joueur peut rejoindre avec un ticket de
+    # taille différente de celui du créateur.
     required = session["match_count"]
     if len(predictions) != required:
         return None, f"Ton ticket doit contenir exactement {required} pronostic(s) (tu en as {len(predictions)})."
@@ -115,6 +118,10 @@ def cancel_expired_sessions():
         supabase.table("tickets").update({"status": "CANCELLED"}).eq("session_id", session["id"]).execute()
 
 def find_resolvable_sessions(api_match_id) -> list:
+    """Sessions IN_PROGRESS contenant ce match, et dont tous les matchs des tickets
+    concernés ont désormais un résultat enregistré. Nécessaire à /resolve (résolution
+    par match) — manquait entièrement, ce qui empêchait bot/handlers/admin.py de
+    s'importer et faisait planter TOUTES les commandes admin au démarrage."""
     sessions = supabase.table("sessions").select("*").eq("status", "IN_PROGRESS").execute().data
     target = str(api_match_id)
     resolvable = []
@@ -131,6 +138,7 @@ def find_resolvable_sessions(api_match_id) -> list:
             resolvable.append(session)
 
     return resolvable
+
 
 def resolve_session(session_id: str):
     session = get_session(session_id)
@@ -167,29 +175,15 @@ def resolve_session(session_id: str):
         else:
             credit_balance(scores[0]["user_id"], pot_total)
             outcomes["winner_id"] = scores[0]["user_id"]
-            
     elif session["type"] == "ARENA":
         if session.get("prize_mode") == "TOP_3" and len(scores) >= 3:
             payouts = [pot_total * 0.50, pot_total * 0.38, pot_total * 0.12]
-            unclaimed_pot = 0
-            
             for i in range(3):
-                if scores[i]["correct"] > 0:
-                    credit_balance(scores[i]["user_id"], int(payouts[i]))
-                else:
-                    unclaimed_pot += int(payouts[i])
-            
-            # CORRECTION : Redistribution du pot non réclamé au vainqueur principal
-            if unclaimed_pot > 0 and scores[0]["correct"] > 0:
-                credit_balance(scores[0]["user_id"], unclaimed_pot)
-                
-            outcomes["winner_id"] = scores[0]["user_id"] if scores[0]["correct"] > 0 else None
+                if scores[i]["correct"] > 0: credit_balance(scores[i]["user_id"], int(payouts[i]))
+            outcomes["winner_id"] = scores[0]["user_id"]
         else:
-            if scores[0]["correct"] > 0: 
-                credit_balance(scores[0]["user_id"], pot_total)
-                outcomes["winner_id"] = scores[0]["user_id"]
-            else:
-                outcomes["winner_id"] = None
+            if scores[0]["correct"] > 0: credit_balance(scores[0]["user_id"], pot_total)
+            outcomes["winner_id"] = scores[0]["user_id"]
 
     supabase.table("sessions").update({"status": "COMPLETED", "winner_id": outcomes.get("winner_id")}).eq("id", session_id).execute()
     supabase.table("tickets").update({"status": "RESOLVED"}).eq("session_id", session_id).execute()
@@ -296,3 +290,4 @@ async def get_live_scores_for_matches(match_ids: list) -> dict:
         matches = get_matches_by_ids(match_ids)
 
     return {str(m["api_match_id"]): m for m in matches}
+
