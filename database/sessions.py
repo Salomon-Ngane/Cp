@@ -1,293 +1,213 @@
-import httpx
-from datetime import datetime, timezone, timedelta
-from database.connection import supabase
-from database.users import credit_balance, get_user_by_id, update_api_quota
+import re
+from telegram import Update
+from telegram.ext import ContextTypes
 import config
-from services import odds_api
+from database.connection import supabase
+from database.users import admin_take_coins, get_user_by_id, get_all_users, get_detailed_stats, get_api_quota
+from database.sessions import set_match_result, find_resolvable_sessions, resolve_session, sync_matches_from_api_async, fetch_and_update_scores_for_resolution
 
-# --- MATCHS ---
+def is_admin(user_id: int) -> bool:
+    return user_id == config.ADMIN_TELEGRAM_ID
 
-def get_active_matches():
-    return supabase.table("matches").select("*").eq("status", "NS").execute().data
+def _clean_number(raw: str) -> str:
+    return re.sub(r"[^\d.]", "", raw)
 
-def get_matches_by_sport(sport: str):
-    return supabase.table("matches").select("*").eq("status", "NS").ilike("sport", f"%{sport}%").execute().data
+async def _notify_normal_outcome(context: ContextTypes.DEFAULT_TYPE, outcome: dict):
+    """Notifie chaque participant du résultat dans le cas normal (gagnant clair / podium).
+    Les cas marginaux (égalité, redistribution) restent gérés séparément par les appelants."""
+    if outcome.get("is_draw_refund"):
+        return
 
-def get_matches_by_ids(match_ids: list):
-    if not match_ids: return []
-    ids = [str(mid) for mid in match_ids]
-    response = supabase.table("matches").select("*").in_("api_match_id", ids).execute()
-    by_id = {str(m["api_match_id"]): m for m in response.data}
-    return [by_id[mid] for mid in ids if mid in by_id]
+    session_type = outcome["type"]
+    scores = outcome["scores"]
+    pot = outcome["pot"]
+    winner_id = outcome.get("winner_id")
 
-def set_match_result(api_match_id, result: str):
-    supabase.table("matches").update({"status": "FINISHED", "result": result}).eq("api_match_id", str(api_match_id)).execute()
-
-# --- SESSIONS ET TICKETS ---
-
-def get_session(session_id: str):
-    res = supabase.table("sessions").select("*").eq("id", session_id).execute()
-    return res.data[0] if res.data else None
-
-def get_open_duels(exclude_creator_id: int = None):
-    query = supabase.table("sessions").select("*").eq("status", "WAITING")
-    if exclude_creator_id is not None:
-        query = query.neq("creator_id", exclude_creator_id)
-    return query.execute().data
-
-def create_session(creator_id: int, session_type: str, gross_fee: int, match_count: int, max_participants: int, prize_mode: str, predictions: list):
-    user = get_user_by_id(creator_id)
-    if not user or int(user["coins_balance"]) < gross_fee:
-        return None, "Solde insuffisant"
-
-    rake_rate = config.RAKE_1V1 if session_type == "DUEL" else config.RAKE_ARENA
-    net_fee = gross_fee - int(round(gross_fee * rake_rate))
-
-    supabase.table("users").update({"coins_balance": int(user["coins_balance"]) - gross_fee}).eq("telegram_id", creator_id).execute()
-
-    session_data = {
-        "creator_id": creator_id,
-        "type": session_type,
-        "gross_entry_fee": gross_fee,
-        "net_entry_fee": net_fee,
-        "match_count": match_count,
-        "max_participants": max_participants,
-        "prize_mode": prize_mode,
-        "status": "WAITING"
-    }
-    session = supabase.table("sessions").insert(session_data).execute().data[0]
-    save_ticket(session["id"], creator_id, predictions)
-    return session, "Succès"
-
-def join_session(session_id: str, joiner_id: int, predictions: list):
-    session = get_session(session_id)
-    if not session or session["status"] != "WAITING":
-        return None, "Session fermée ou introuvable."
-
-    # ⚠️ NE PAS RETIRER : équité du duel — ce contrôle a déjà disparu 3 fois lors de
-    # réécritures précédentes. Sans lui, un joueur peut rejoindre avec un ticket de
-    # taille différente de celui du créateur.
-    required = session["match_count"]
-    if len(predictions) != required:
-        return None, f"Ton ticket doit contenir exactement {required} pronostic(s) (tu en as {len(predictions)})."
-
-    gross_fee = int(session["gross_entry_fee"])
-    joiner = get_user_by_id(joiner_id)
-    if not joiner or int(joiner["coins_balance"]) < gross_fee:
-        return None, "Solde insuffisant."
-
-    tickets = get_tickets_for_session(session_id)
-    if len(tickets) >= session.get("max_participants", 2):
-        return None, "Le salon est déjà plein."
-
-    supabase.table("users").update({"coins_balance": int(joiner["coins_balance"]) - gross_fee}).eq("telegram_id", joiner_id).execute()
-    save_ticket(session_id, joiner_id, predictions)
-
-    if len(tickets) + 1 == session.get("max_participants", 2):
-        update_data = {"status": "IN_PROGRESS"}
-        if session["type"] == "DUEL": update_data["opponent_id"] = joiner_id
-        supabase.table("sessions").update(update_data).eq("id", session_id).execute()
-        return get_session(session_id), "Succès"
-    
-    return session, "En attente de joueurs"
-
-def save_ticket(session_id: str, user_id: int, predictions: list):
-    formatted = [{"match_id": str(p["match_id"]), "pick": p["pick"], "odds": float(p.get("odds", 1.0))} for p in predictions]
-    return supabase.table("tickets").insert({"session_id": session_id, "user_id": user_id, "predictions": formatted, "status": "PENDING"}).execute().data[0]
-
-def get_tickets_for_session(session_id: str) -> list:
-    return supabase.table("tickets").select("*").eq("session_id", session_id).execute().data
-
-def get_user_sessions(user_id: int, history_limit: int = 3) -> list:
-    user_tickets = supabase.table("tickets").select("session_id").eq("user_id", user_id).execute().data
-    session_ids = [t["session_id"] for t in user_tickets]
-    if not session_ids: return []
-
-    active = supabase.table("sessions").select("*").in_("id", session_ids).in_("status", ["WAITING", "IN_PROGRESS"]).execute().data
-    completed = supabase.table("sessions").select("*").in_("id", session_ids).eq("status", "COMPLETED").order("created_at", desc=True).limit(history_limit).execute().data
-    return active + completed
-
-def cancel_expired_sessions():
-    expiration_date = (datetime.now(timezone.utc) - timedelta(hours=config.SESSION_EXPIRATION_HOURS)).isoformat()
-    expired = supabase.table("sessions").select("*").eq("status", "WAITING").lte("created_at", expiration_date).execute().data
-    
-    for session in expired:
-        tickets = get_tickets_for_session(session["id"])
-        for t in tickets: credit_balance(t["user_id"], session["gross_entry_fee"])
-        supabase.table("sessions").update({"status": "CANCELLED"}).eq("id", session["id"]).execute()
-        supabase.table("tickets").update({"status": "CANCELLED"}).eq("session_id", session["id"]).execute()
-
-def find_resolvable_sessions(api_match_id) -> list:
-    """Sessions IN_PROGRESS contenant ce match, et dont tous les matchs des tickets
-    concernés ont désormais un résultat enregistré. Nécessaire à /resolve (résolution
-    par match) — manquait entièrement, ce qui empêchait bot/handlers/admin.py de
-    s'importer et faisait planter TOUTES les commandes admin au démarrage."""
-    sessions = supabase.table("sessions").select("*").eq("status", "IN_PROGRESS").execute().data
-    target = str(api_match_id)
-    resolvable = []
-
-    for session in sessions:
-        tickets = get_tickets_for_session(session["id"])
-        if not tickets:
-            continue
-        all_match_ids = set(str(p["match_id"]) for t in tickets for p in t["predictions"])
-        if target not in all_match_ids:
-            continue
-        matches = get_matches_by_ids(list(all_match_ids))
-        if len(matches) == len(all_match_ids) and all(m.get("result") for m in matches):
-            resolvable.append(session)
-
-    return resolvable
-
-
-def resolve_session(session_id: str):
-    session = get_session(session_id)
-    if not session or session["status"] != "IN_PROGRESS": return None
-
-    tickets = get_tickets_for_session(session_id)
-    all_match_ids = set(str(p["match_id"]) for t in tickets for p in t["predictions"])
-    
-    matches = get_matches_by_ids(list(all_match_ids))
-    results_by_match = {str(m["api_match_id"]): m.get("result") for m in matches}
-
-    scores = []
-    for t in tickets:
-        correct, valid_odds = 0, 1.0
-        for p in t["predictions"]:
-            match_res = results_by_match.get(str(p["match_id"]))
-            if match_res == "CANCEL": continue
-            elif match_res == p["pick"]:
-                correct += 1
-                valid_odds *= float(p.get("odds", 1.0))
-        scores.append({"user_id": t["user_id"], "correct": correct, "valid_odds": round(valid_odds, 2)})
-
-    scores.sort(key=lambda x: (x["correct"], x["valid_odds"]), reverse=True)
-    pot_total = session["net_entry_fee"] * len(tickets)
-    outcomes = {"session_id": session_id, "type": session["type"], "scores": scores, "pot": pot_total, "notifications": []}
-
-    if session["type"] == "DUEL":
-        if scores[0]["correct"] == scores[1]["correct"] and scores[0]["valid_odds"] == scores[1]["valid_odds"]:
-            gross_fee = session["gross_entry_fee"]
-            credit_balance(scores[0]["user_id"], gross_fee)
-            credit_balance(scores[1]["user_id"], gross_fee)
-            outcomes["winner_id"] = None
-            outcomes["is_draw_refund"] = True
-        else:
-            credit_balance(scores[0]["user_id"], pot_total)
-            outcomes["winner_id"] = scores[0]["user_id"]
-    elif session["type"] == "ARENA":
-        if session.get("prize_mode") == "TOP_3" and len(scores) >= 3:
-            payouts = [pot_total * 0.50, pot_total * 0.38, pot_total * 0.12]
-            for i in range(3):
-                if scores[i]["correct"] > 0: credit_balance(scores[i]["user_id"], int(payouts[i]))
-            outcomes["winner_id"] = scores[0]["user_id"]
-        else:
-            if scores[0]["correct"] > 0: credit_balance(scores[0]["user_id"], pot_total)
-            outcomes["winner_id"] = scores[0]["user_id"]
-
-    supabase.table("sessions").update({"status": "COMPLETED", "winner_id": outcomes.get("winner_id")}).eq("id", session_id).execute()
-    supabase.table("tickets").update({"status": "RESOLVED"}).eq("session_id", session_id).execute()
-    return outcomes
-
-async def sync_matches_from_api_async():
-    try:
-        matches, quota, calls_used = await odds_api.sync_today_matches(config.ODDS_API_KEY)
-        update_api_quota(quota)
-        if not matches: return 0, "Aucun match."
-        saved = 0
-        for match in matches:
+    if session_type == "DUEL":
+        for s in scores:
+            other = next((x for x in scores if x["user_id"] != s["user_id"]), {"correct": 0})
+            if s["user_id"] == winner_id:
+                text = f"🏆 **VICTOIRE !** 🏆\n\n`{s['correct']}` bons pronostics contre `{other['correct']}` — tu rafles la mise !\n💰 `+{pot}` Coins."
+            else:
+                text = f"💥 **DÉFAITE...** 💥\n\n`{s['correct']}` contre `{other['correct']}`. La revanche t'attend ! 🔁"
             try:
-                supabase.table("matches").upsert(match, on_conflict="api_match_id").execute()
-                saved += 1
+                await context.bot.send_message(chat_id=s["user_id"], text=text, parse_mode="Markdown")
+            except Exception:
+                pass
+        return
+
+    ranked = sorted(scores, key=lambda x: (-x["correct"], -x["valid_odds"]))
+    rank_by_user = {s["user_id"]: i + 1 for i, s in enumerate(ranked)}
+    payout_pct = {1: "50%", 2: "38%", 3: "12%"}
+    for s in scores:
+        rank = rank_by_user[s["user_id"]]
+        if rank <= 3 and s["correct"] > 0:
+            text = f"🏆 **PODIUM ! Tu termines #{rank}** 🏆\n\n`{s['correct']}` bons pronostics — ta part de la cagnotte ({payout_pct.get(rank, '')}) a été créditée. 🎉"
+        elif rank <= 3 and s["correct"] == 0:
+            continue  # couvert par outcome["notifications"] (redistribution)
+        else:
+            text = f"📊 **Résultat de l'Arène**\n\nTu termines #{rank} avec `{s['correct']}` bons pronostics. Retente ta chance ! 💪"
+        try:
+            await context.bot.send_message(chat_id=s["user_id"], text=text, parse_mode="Markdown")
+        except Exception:
+            pass
+
+
+async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    args = context.args
+    if len(args) != 2 or args[1].upper() not in ("HOME", "DRAW", "AWAY", "CANCEL"):
+        await update.message.reply_text("❌ Usage : /resolve [api_match_id] [HOME|DRAW|AWAY|CANCEL]")
+        return
+
+    api_match_id = _clean_number(args[0])
+    result = args[1].upper()
+    set_match_result(api_match_id, result)
+
+    resolvable = find_resolvable_sessions(api_match_id)
+    resolved_count = 0
+    for session in resolvable:
+        outcome = resolve_session(session["id"])
+        if outcome:
+            resolved_count += 1
+            await _notify_normal_outcome(context, outcome)
+            for notif in outcome.get("notifications", []):
+                try: await context.bot.send_message(chat_id=notif["user_id"], text=notif["text"])
+                except Exception: pass
+
+            if outcome.get("is_draw_refund"):
+                for s_score in outcome.get("scores", []):
+                    try: await context.bot.send_message(chat_id=s_score["user_id"], text="🤝 Égalité parfaite ! Votre mise vous a été intégralement remboursée.")
+                    except Exception: pass
+
+    await update.message.reply_text(f"✅ Résultat enregistré. 🏁 {resolved_count} session(s) tranchée(s).")
+
+async def admin_resolve_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    if not context.args:
+        await update.message.reply_text("❌ Usage : /resolve_session [id_de_la_session]")
+        return
+    
+    session_id = context.args[0]
+    session = supabase.table("sessions").select("*").eq("id", session_id).execute()
+    if not session.data:
+        await update.message.reply_text("❌ Session introuvable.")
+        return
+    
+    sess_obj = session.data[0]
+    if sess_obj["status"] != "IN_PROGRESS":
+        await update.message.reply_text(f"⚠️ La session doit être 'IN_PROGRESS' (Actuelle : {sess_obj['status']}).")
+        return
+
+    msg = await update.message.reply_text("⏳ Récupération des scores finaux depuis The Odds API (jusqu'à J-3)...")
+    success, info_msg = await fetch_and_update_scores_for_resolution(session_id)
+    
+    outcome = resolve_session(session_id)
+    if outcome:
+        await _notify_normal_outcome(context, outcome)
+        for notif in outcome.get("notifications", []):
+            try: await context.bot.send_message(chat_id=notif["user_id"], text=notif["text"])
             except Exception: pass
-        return saved, f"Succès : {saved} matchs importés."
-    except Exception as e: return 0, str(e)
-
-async def fetch_and_update_scores_for_resolution(session_id: str):
-    tickets = get_tickets_for_session(session_id)
-    if not tickets: return False, "Aucun ticket trouvé."
-    
-    match_ids = set(str(p["match_id"]) for t in tickets for p in t["predictions"])
-    matches = get_matches_by_ids(list(match_ids))
-    sports = set(m["sport"] for m in matches)
-    
-    quota = None
-    updated_count = 0
-    
-    async with httpx.AsyncClient() as client:
-        for sport in sports:
-            url = f"https://api.the-odds-api.com/v4/sports/{sport}/scores/?apiKey={config.ODDS_API_KEY}&daysFrom=3"
-            resp = await client.get(url, timeout=15)
             
-            if resp.status_code == 200:
-                quota = resp.headers.get("x-requests-remaining", quota)
-                for event in resp.json():
-                    if str(event["id"]) in match_ids and event.get("completed"):
-                        scores = event.get("scores")
-                        home_score = away_score = 0
-                        if scores:
-                            for s in scores:
-                                try: score_val = int(s.get("score") or 0)
-                                except: score_val = 0
-                                if s.get("name") == event.get("home_team"): home_score = score_val
-                                elif s.get("name") == event.get("away_team"): away_score = score_val
-                        
-                        if home_score > away_score: res = "HOME"
-                        elif away_score > home_score: res = "AWAY"
-                        else: res = "DRAW"
-                        
-                        set_match_result(str(event["id"]), res)
-                        updated_count += 1
-                        
-    if quota: update_api_quota(quota)
-    return True, f"{updated_count} matchs terminés mis à jour."
+        if outcome.get("is_draw_refund"):
+            for s_score in outcome.get("scores", []):
+                try: await context.bot.send_message(chat_id=s_score["user_id"], text="🤝 Égalité parfaite ! Remboursement effectué.")
+                except Exception: pass
+                
+        await msg.edit_text(f"✅ Session tranchée !\nℹ️ {info_msg}\n💰 Cagnotte distribuée.")
+    else:
+        await msg.edit_text(f"⚠️ {info_msg}\nTous les matchs ne sont pas terminés.")
 
-def get_weekly_leaderboard(limit: int = 10) -> list:
-    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    sessions = supabase.table("sessions").select("*").eq("status", "COMPLETED").gte("created_at", week_ago).not_.is_("winner_id", "null").execute().data
-    tally = {}
-    for s in sessions:
-        winner = s["winner_id"]
-        pot = s["net_entry_fee"] * s.get("max_participants", 2)
-        entry = tally.setdefault(winner, {"wins": 0, "coins_won": 0})
-        entry["wins"] += 1
-        entry["coins_won"] += pot
+async def admin_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("❌ Usage : /give [id_ou_code] [montant]")
+        return
+    
+    target_raw, amount_str = args[0], _clean_number(args[1])
+    try:
+        amount = int(amount_str)
+        if target_raw.isdigit() and len(target_raw) == 5:
+            res = supabase.table("users").select("*").eq("player_code", target_raw).execute().data
+            user = res[0] if res else None
+        else:
+            user = get_user_by_id(int(target_raw))
 
-    ranked = sorted(tally.items(), key=lambda x: (-x[1]["wins"], -x[1]["coins_won"]))[:limit]
-    leaderboard = []
-    for telegram_id, stats in ranked:
-        user = get_user_by_id(telegram_id)
-        username = (user["username"] if user and user.get("username") else None) or f"Joueur {telegram_id}"
-        leaderboard.append({"telegram_id": telegram_id, "username": username, "wins": stats["wins"], "coins_won": stats["coins_won"]})
-    return leaderboard
+        if not user:
+            await update.message.reply_text("❌ Utilisateur introuvable.")
+            return
 
-LIVE_CACHE_MAX_AGE_SECONDS = 180
-async def get_live_scores_for_matches(match_ids: list) -> dict:
-    matches = get_matches_by_ids(match_ids)
-    now = datetime.now(timezone.utc)
-    sports_to_refresh = set()
+        from database.users import credit_balance
+        new_bal = credit_balance(user["telegram_id"], amount)
+        await update.message.reply_text(f"✅ `{amount}` Coins ajoutés à **{user['username']}**. Nouveau solde : `{new_bal}`.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur : {str(e)}")
 
-    for m in matches:
-        last_check = m.get("last_score_check")
-        if not last_check:
-            sports_to_refresh.add(m["sport"])
-            continue
-        last = datetime.fromisoformat(last_check.replace("Z", "+00:00"))
-        if (now - last).total_seconds() > LIVE_CACHE_MAX_AGE_SECONDS:
-            sports_to_refresh.add(m["sport"])
+async def admin_take(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("❌ Usage : /take [id_ou_code] [montant]")
+        return
+    try:
+        target_raw, amount = args[0], int(_clean_number(args[1]))
+        if target_raw.isdigit() and len(target_raw) == 5:
+            res = supabase.table("users").select("*").eq("player_code", target_raw).execute().data
+            user = res[0] if res else None
+        else:
+            user = get_user_by_id(int(target_raw))
 
-    if sports_to_refresh:
-        async with httpx.AsyncClient() as client:
-            for sport in sports_to_refresh:
-                scores = await odds_api.fetch_live_scores(client, config.ODDS_API_KEY, sport)
-                for s in scores:
-                    supabase.table("matches").update({
-                        "live_score_home": s["home_score"],
-                        "live_score_away": s["away_score"],
-                        "live_status": s["status"],
-                        "last_score_check": now.isoformat(),
-                    }).eq("api_match_id", s["api_match_id"]).execute()
-        matches = get_matches_by_ids(match_ids)
+        if not user:
+            await update.message.reply_text("❌ Utilisateur introuvable.")
+            return
 
-    return {str(m["api_match_id"]): m for m in matches}
+        new_bal = admin_take_coins(user["telegram_id"], amount)
+        await update.message.reply_text(f"✅ Prélèvement effectué. Nouveau solde : `{new_bal}`.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur : {str(e)}")
 
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    stats = get_detailed_stats()
+    quota = get_api_quota()
+    
+    text = (
+        "📊 **STATISTIQUES DE LA PLATEFORME**\n\n"
+        f"👥 Joueurs inscrits : `{stats.get('total_users', 0)}`\n"
+        f"💰 Coins en circulation : `{stats.get('total_coins', 0)}`\n"
+        f"🎟️ Tickets créés : `{stats.get('total_tickets', 0)}`\n"
+        f"🟡 Salons en attente : `{stats.get('waiting_sessions', 0)}`\n"
+        f"🔵 Duels / Arenas en cours : `{stats.get('active_sessions', 0)}`\n"
+        f"🏁 Sessions terminées : `{stats.get('completed_sessions', 0)}`\n\n"
+        f"🔌 **Quota The Odds API restant :** `{quota}`"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def admin_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    await update.message.reply_text("⏳ Synchronisation avec Odds-API en cours...")
+    count, msg = await sync_matches_from_api_async()
+    await update.message.reply_text(f"🔄 Résultat : {msg}")
+
+async def admin_sweep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    from database.sessions import cancel_expired_sessions
+    cancel_expired_sessions()
+    await update.message.reply_text("🧹 Nettoyage des sessions expirées (>24h) effectué.")
+
+async def admin_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id): return
+    msg_text = " ".join(context.args)
+    if not msg_text:
+        await update.message.reply_text("❌ Usage : /alert [message]")
+        return
+    
+    users = get_all_users()
+    sent = 0
+    for u in users:
+        try:
+            await context.bot.send_message(chat_id=u["telegram_id"], text=f"📢 **ANNONCE CLASHSPORT**\n\n{msg_text}", parse_mode="Markdown")
+            sent += 1
+        except Exception: pass
+    await update.message.reply_text(f"📢 Diffusé à {sent}/{len(users)} joueurs.")
