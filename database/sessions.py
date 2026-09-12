@@ -119,13 +119,15 @@ def get_user_sessions(user_id: int, history_limit: int = 3) -> list:
 
 def cancel_expired_sessions():
     expiration_date = (datetime.now(timezone.utc) - timedelta(hours=config.SESSION_EXPIRATION_HOURS)).isoformat()
-    expired = supabase.table("sessions").select("*").eq("status", "WAITING").lte("created_at", expiration_date).execute().data
+    # CORRECTION : Filtre eq("type", "ARENA") ajouté
+    expired = supabase.table("sessions").select("*").eq("status", "WAITING").eq("type", "ARENA").lte("created_at", expiration_date).execute().data
     
     for session in expired:
         tickets = get_tickets_for_session(session["id"])
         for t in tickets: credit_balance(t["user_id"], session["gross_entry_fee"])
         supabase.table("sessions").update({"status": "CANCELLED"}).eq("id", session["id"]).execute()
         supabase.table("tickets").update({"status": "CANCELLED"}).eq("session_id", session["id"]).execute()
+
 
 def find_resolvable_sessions(api_match_id) -> list:
     sessions = supabase.table("sessions").select("*").eq("status", "IN_PROGRESS").execute().data
@@ -155,16 +157,19 @@ def resolve_session(session_id: str):
     matches = get_matches_by_ids(list(all_match_ids))
     results_by_match = {str(m["api_match_id"]): m.get("result") for m in matches}
 
+# Dans la fonction resolve_session()
     scores = []
     for t in tickets:
-        correct, valid_odds = 0, 1.0
+        correct = 0
+        valid_odds = 0.0 # CORRECTION : Initialisation à 0.0 pour une somme
         for p in t["predictions"]:
             match_res = results_by_match.get(str(p["match_id"]))
             if match_res == "CANCEL": continue
             elif match_res == p["pick"]:
                 correct += 1
-                valid_odds *= float(p.get("odds", 1.0))
+                valid_odds += float(p.get("odds", 1.0)) # CORRECTION : Addition (+=) au lieu de Produit (*=)
         scores.append({"user_id": t["user_id"], "correct": correct, "valid_odds": round(valid_odds, 2)})
+
 
     scores.sort(key=lambda x: (x["correct"], x["valid_odds"]), reverse=True)
     pot_total = session["net_entry_fee"] * len(tickets)
