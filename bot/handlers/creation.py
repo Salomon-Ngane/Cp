@@ -131,12 +131,13 @@ async def _show_sports_selection(query):
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 async def _show_matches_for_sport(query, sport):
+    user_id = query.from_user.id
+    update_draft_settings(user_id, {"current_sport": sport})
     matches = get_matches_by_sport(sport)
     if not matches:
         await query.answer("Aucun match disponible pour ce sport aujourd'hui.", show_alert=True)
         return
     
-    user_id = query.from_user.id
     draft = get_draft_settings(user_id)
     cart = {str(item["match_id"]): item["pick"] for item in get_cart(user_id)}
     target_count = draft.get("match_count", 1)
@@ -170,27 +171,39 @@ async def _show_matches_for_sport(query, sport):
 
 async def _refresh_match_selection_view(query, user_id):
     draft = get_draft_settings(user_id)
-    cart = get_cart(user_id)
-    target_count = draft.get("match_count", 1)
-    
-    if len(cart) > 0:
-        # On recharge les matchs du premier sport trouvé dans le panier ou par défaut
-        matches = get_active_matches()
-        if matches:
-            await _show_matches_for_sport(query, "Soccer")
-            return
-    await _show_sports_selection(query)
+    sport = draft.get("current_sport", "Soccer")
+    await _show_matches_for_sport(query, sport)
 
 async def _process_ticket_creation(query, user_id, context):
     draft = get_draft_settings(user_id)
     cart = get_cart(user_id)
-    
+    joining_session_id = draft.get("joining_session_id")
+
     if len(cart) != draft.get("match_count", 1):
         await query.answer("Nombre de pronostics invalide !", show_alert=True)
         return
 
     predictions = [{"match_id": item["match_id"], "pick": item["pick"], "odds": item["odds"]} for item in cart]
-    
+
+    if joining_session_id:
+        session, msg = join_session(joining_session_id, user_id, predictions)
+        if not session:
+            await query.answer(f"Erreur : {msg}", show_alert=True)
+            return
+        clear_draft(user_id)
+        db_user = get_user_by_id(user_id)
+        text = (
+            "⚔️ **TICKET VALIDÉ !**\n\n"
+            f"💰 Nouveau solde : `{db_user['coins_balance']}` Coins\n\n"
+            "Le défi est accepté, tu peux suivre l'avancée dans Mes Tickets."
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Voir mon ticket", callback_data=f"ticket_{joining_session_id}_mine")],
+            [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
+        ])
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
     session, msg = create_session(
         creator_id=user_id,
         session_type=draft.get("session_type", "DUEL"),
