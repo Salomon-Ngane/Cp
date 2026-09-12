@@ -32,7 +32,7 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         update_draft_settings(user_id, {"session_type": stype})
         if stype == "DUEL":
             update_draft_settings(user_id, {"max_participants": 2, "prize_mode": "WINNER_TAKES_ALL"})
-            await _ask_match_count(query, stype)
+            await _ask_match_count_text(query)
         else:
             text = "🏟️ **Configuration Arena**\n\nCombien de joueurs maximum pour ce salon ?"
             keyboard = InlineKeyboardMarkup([
@@ -55,12 +55,7 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
     elif data.startswith("arena_prize_"):
         mode = "TOP_3" if data.split("_")[2] == "TOP3" else "WINNER_TAKES_ALL"
         update_draft_settings(user_id, {"prize_mode": mode})
-        await _ask_match_count(query, "ARENA")
-
-    elif data.startswith("count_"):
-        cnt = int(data.split("_")[1])
-        update_draft_settings(user_id, {"match_count": cnt})
-        await _ask_entry_fee(query)
+        await _ask_match_count_text(query)
 
     elif data.startswith("fee_"):
         fee = int(data.split("_")[1])
@@ -100,7 +95,6 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         await show_ticket_detail(query, sid, tab)
 
     elif data == "my_tickets":
-        # Correction : Remplacement de la suppression de message par une édition propre
         from database.sessions import cancel_expired_sessions, get_user_sessions
         from bot.handlers.tickets_view import _tickets_keyboard
         cancel_expired_sessions()
@@ -111,7 +105,6 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
             await query.edit_message_text("📋 **Tes Tickets Clashsport**", reply_markup=_tickets_keyboard(sessions), parse_mode="Markdown")
 
     elif data == "live_all":
-        # Correction : Idem, on édite au lieu de supprimer
         from database.sessions import get_user_sessions
         sessions = [s for s in get_user_sessions(user_id, history_limit=0) if s["status"] in ("WAITING", "IN_PROGRESS")]
         if not sessions:
@@ -121,24 +114,38 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
             await query.edit_message_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=keyboard, parse_mode="Markdown")
 
 
-async def _ask_match_count(query, stype):
-    text = f"🎯 **Création {stype}**\n\nCombien de matchs voulez-vous mettre sur votre ticket ?"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("1 Match", callback_data="count_1"), InlineKeyboardButton("2 Matchs", callback_data="count_2")],
-        [InlineKeyboardButton("3 Matchs", callback_data="count_3"), InlineKeyboardButton("5 Matchs", callback_data="count_5")],
-        [InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]
-    ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+async def _ask_match_count_text(query):
+    # On mémorise dans le draft qu'on attend la saisie du nombre de matchs
+    update_draft_settings(query.from_user.id, {"awaiting_match_count": True})
+    text = "🎯 **Configuration du Salon**\n\nEntrez manuellement le **nombre de matchs** que vous souhaitez mettre sur votre ticket (ex: 1, 2, 4...) :"
+    await query.edit_message_text(text, parse_mode="Markdown")
 
 
-async def _ask_entry_fee(query):
-    text = "💰 **Mise d'entrée (Coins)**\n\nChoisissez le montant de la mise pour ce salon :"
+async def handle_text_match_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    draft = get_draft_settings(user_id)
+    
+    # Si le bot n'attend pas de nombre de matchs pour cet utilisateur, on ignore
+    if not draft.get("awaiting_match_count"):
+        return
+
+    text_input = update.message.text.strip()
+    if not text_input.isdigit() or int(text_input) <= 0:
+        await update.message.reply_text("❌ Veuillez entrer un nombre valide supérieur à 0.")
+        return
+
+    cnt = int(text_input)
+    # On enregistre le nombre et on désactive l'attente
+    update_draft_settings(user_id, {"match_count": cnt, "awaiting_match_count": False})
+    
+    # On passe à l'étape suivante : choix de la mise
+    text = f"💰 **Mise d'entrée (Coins)**\n\nNombre de matchs enregistré : `{cnt}`\nChoisissez le montant de la mise pour ce salon :"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("100 Coins", callback_data="fee_100"), InlineKeyboardButton("500 Coins", callback_data="fee_500")],
         [InlineKeyboardButton("1000 Coins", callback_data="fee_1000"), InlineKeyboardButton("5000 Coins", callback_data="fee_5000")],
-        [InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]
+        [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
     ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def _show_sports_selection(query):
