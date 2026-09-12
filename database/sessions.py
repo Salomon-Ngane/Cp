@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 from database.connection import supabase
 from database.users import credit_balance, get_user_by_id, update_api_quota
 import config
-import odds_api
+from services import odds_api
 
 # --- MATCHS ---
 
@@ -64,6 +64,10 @@ def join_session(session_id: str, joiner_id: int, predictions: list):
     if not session or session["status"] != "WAITING":
         return None, "Session fermée ou introuvable."
 
+    required = session["match_count"]
+    if len(predictions) != required:
+        return None, f"Ton ticket doit contenir exactement {required} pronostic(s) (tu en as {len(predictions)})."
+
     gross_fee = int(session["gross_entry_fee"])
     joiner = get_user_by_id(joiner_id)
     if not joiner or int(joiner["coins_balance"]) < gross_fee:
@@ -110,6 +114,24 @@ def cancel_expired_sessions():
         supabase.table("sessions").update({"status": "CANCELLED"}).eq("id", session["id"]).execute()
         supabase.table("tickets").update({"status": "CANCELLED"}).eq("session_id", session["id"]).execute()
 
+def find_resolvable_sessions(api_match_id) -> list:
+    sessions = supabase.table("sessions").select("*").eq("status", "IN_PROGRESS").execute().data
+    target = str(api_match_id)
+    resolvable = []
+
+    for session in sessions:
+        tickets = get_tickets_for_session(session["id"])
+        if not tickets:
+            continue
+        all_match_ids = set(str(p["match_id"]) for t in tickets for p in t["predictions"])
+        if target not in all_match_ids:
+            continue
+        matches = get_matches_by_ids(list(all_match_ids))
+        if len(matches) == len(all_match_ids) and all(m.get("result") for m in matches):
+            resolvable.append(session)
+
+    return resolvable
+
 def resolve_session(session_id: str):
     session = get_session(session_id)
     if not session or session["status"] != "IN_PROGRESS": return None
@@ -145,15 +167,29 @@ def resolve_session(session_id: str):
         else:
             credit_balance(scores[0]["user_id"], pot_total)
             outcomes["winner_id"] = scores[0]["user_id"]
+            
     elif session["type"] == "ARENA":
         if session.get("prize_mode") == "TOP_3" and len(scores) >= 3:
             payouts = [pot_total * 0.50, pot_total * 0.38, pot_total * 0.12]
+            unclaimed_pot = 0
+            
             for i in range(3):
-                if scores[i]["correct"] > 0: credit_balance(scores[i]["user_id"], int(payouts[i]))
-            outcomes["winner_id"] = scores[0]["user_id"]
+                if scores[i]["correct"] > 0:
+                    credit_balance(scores[i]["user_id"], int(payouts[i]))
+                else:
+                    unclaimed_pot += int(payouts[i])
+            
+            # CORRECTION : Redistribution du pot non réclamé au vainqueur principal
+            if unclaimed_pot > 0 and scores[0]["correct"] > 0:
+                credit_balance(scores[0]["user_id"], unclaimed_pot)
+                
+            outcomes["winner_id"] = scores[0]["user_id"] if scores[0]["correct"] > 0 else None
         else:
-            if scores[0]["correct"] > 0: credit_balance(scores[0]["user_id"], pot_total)
-            outcomes["winner_id"] = scores[0]["user_id"]
+            if scores[0]["correct"] > 0: 
+                credit_balance(scores[0]["user_id"], pot_total)
+                outcomes["winner_id"] = scores[0]["user_id"]
+            else:
+                outcomes["winner_id"] = None
 
     supabase.table("sessions").update({"status": "COMPLETED", "winner_id": outcomes.get("winner_id")}).eq("id", session_id).execute()
     supabase.table("tickets").update({"status": "RESOLVED"}).eq("session_id", session_id).execute()
@@ -260,4 +296,3 @@ async def get_live_scores_for_matches(match_ids: list) -> dict:
         matches = get_matches_by_ids(match_ids)
 
     return {str(m["api_match_id"]): m for m in matches}
-
