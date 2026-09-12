@@ -73,7 +73,15 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
 
     elif data.startswith("bet_"):
         _, mid, pick, odds = data.split("_")
-        toggle_cart_item(user_id, mid, pick, float(odds))
+        draft = get_draft_settings(user_id)
+        target_count = draft.get("match_count", 1)
+        
+        success = toggle_cart_item(user_id, mid, pick, float(odds), max_count=target_count)
+        
+        if not success:
+            await query.answer("⚠️ Panier complet ! Désélectionnez un match ou validez votre ticket.", show_alert=True)
+            return
+            
         await _refresh_match_selection_view(query, user_id)
 
     elif data == "validate_ticket":
@@ -92,15 +100,25 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         await show_ticket_detail(query, sid, tab)
 
     elif data == "my_tickets":
-        from bot.handlers.tickets_view import user_tickets
-        # Redirection vers la vue des tickets sous forme de message classique
-        await query.message.delete()
-        await user_tickets(update, context)
+        # Correction : Remplacement de la suppression de message par une édition propre
+        from database.sessions import cancel_expired_sessions, get_user_sessions
+        from bot.handlers.tickets_view import _tickets_keyboard
+        cancel_expired_sessions()
+        sessions = get_user_sessions(user_id)
+        if not sessions:
+            await query.edit_message_text("📭 Aucun ticket pour l'instant.", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+        else:
+            await query.edit_message_text("📋 **Tes Tickets Clashsport**", reply_markup=_tickets_keyboard(sessions), parse_mode="Markdown")
 
     elif data == "live_all":
-        from bot.handlers.tickets_view import user_live
-        await query.message.delete()
-        await user_live(update, context)
+        # Correction : Idem, on édite au lieu de supprimer
+        from database.sessions import get_user_sessions
+        sessions = [s for s in get_user_sessions(user_id, history_limit=0) if s["status"] in ("WAITING", "IN_PROGRESS")]
+        if not sessions:
+            await query.edit_message_text("📭 Aucun duel en cours à suivre.", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+        else:
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]])
+            await query.edit_message_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def _ask_match_count(query, stype):
@@ -112,6 +130,7 @@ async def _ask_match_count(query, stype):
     ])
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
+
 async def _ask_entry_fee(query):
     text = "💰 **Mise d'entrée (Coins)**\n\nChoisissez le montant de la mise pour ce salon :"
     keyboard = InlineKeyboardMarkup([
@@ -121,6 +140,7 @@ async def _ask_entry_fee(query):
     ])
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
+
 async def _show_sports_selection(query):
     text = "⚽ **Sélection des Matchs**\n\nChoisissez un sport pour composer votre ticket :"
     keyboard = InlineKeyboardMarkup([
@@ -129,6 +149,7 @@ async def _show_sports_selection(query):
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]
     ])
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
 
 async def _show_matches_for_sport(query, sport):
     user_id = query.from_user.id
@@ -169,10 +190,12 @@ async def _show_matches_for_sport(query, sport):
 
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
+
 async def _refresh_match_selection_view(query, user_id):
     draft = get_draft_settings(user_id)
     sport = draft.get("current_sport", "Soccer")
     await _show_matches_for_sport(query, sport)
+
 
 async def _process_ticket_creation(query, user_id, context):
     draft = get_draft_settings(user_id)
