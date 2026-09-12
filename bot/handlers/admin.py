@@ -12,6 +12,44 @@ def is_admin(user_id: int) -> bool:
 def _clean_number(raw: str) -> str:
     return re.sub(r"[^\d.]", "", raw)
 
+async def _notify_normal_outcome(context: ContextTypes.DEFAULT_TYPE, outcome: dict):
+    if outcome.get("is_draw_refund"):
+        return
+
+    session_type = outcome["type"]
+    scores = outcome["scores"]
+    pot = outcome["pot"]
+    winner_id = outcome.get("winner_id")
+
+    if session_type == "DUEL":
+        for s in scores:
+            other = next((x for x in scores if x["user_id"] != s["user_id"]), {"correct": 0})
+            if s["user_id"] == winner_id:
+                text = f"🏆 **VICTOIRE !** 🏆\n\n`{s['correct']}` bons pronostics contre `{other['correct']}` — tu rafles la mise !\n💰 `+{pot}` Coins."
+            else:
+                text = f"💥 **DÉFAITE...** 💥\n\n`{s['correct']}` contre `{other['correct']}`. La revanche t'attend ! 🔁"
+            try:
+                await context.bot.send_message(chat_id=s["user_id"], text=text, parse_mode="Markdown")
+            except Exception:
+                pass
+        return
+
+    ranked = sorted(scores, key=lambda x: (-x["correct"], -x["valid_odds"]))
+    rank_by_user = {s["user_id"]: i + 1 for i, s in enumerate(ranked)}
+    payout_pct = {1: "50%", 2: "38%", 3: "12%"}
+    for s in scores:
+        rank = rank_by_user[s["user_id"]]
+        if rank <= 3 and s["correct"] > 0:
+            text = f"🏆 **PODIUM ! Tu termines #{rank}** 🏆\n\n`{s['correct']}` bons pronostics — ta part de la cagnotte ({payout_pct.get(rank, '')}) a été créditée. 🎉"
+        elif rank <= 3 and s["correct"] == 0:
+            continue
+        else:
+            text = f"📊 **Résultat de l'Arène**\n\nTu termines #{rank} avec `{s['correct']}` bons pronostics. Retente ta chance ! 💪"
+        try:
+            await context.bot.send_message(chat_id=s["user_id"], text=text, parse_mode="Markdown")
+        except Exception:
+            pass
+
 async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     args = context.args
@@ -19,7 +57,8 @@ async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Usage : /resolve [api_match_id] [HOME|DRAW|AWAY|CANCEL]")
         return
 
-    api_match_id = _clean_number(args[0])
+    # CORRECTION : On ne nettoie plus l'ID avec _clean_number pour conserver les lettres de The Odds API
+    api_match_id = args[0].strip()
     result = args[1].upper()
     set_match_result(api_match_id, result)
 
@@ -29,6 +68,7 @@ async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         outcome = resolve_session(session["id"])
         if outcome:
             resolved_count += 1
+            await _notify_normal_outcome(context, outcome)
             for notif in outcome.get("notifications", []):
                 try: await context.bot.send_message(chat_id=notif["user_id"], text=notif["text"])
                 except Exception: pass
@@ -62,6 +102,7 @@ async def admin_resolve_session(update: Update, context: ContextTypes.DEFAULT_TY
     
     outcome = resolve_session(session_id)
     if outcome:
+        await _notify_normal_outcome(context, outcome)
         for notif in outcome.get("notifications", []):
             try: await context.bot.send_message(chat_id=notif["user_id"], text=notif["text"])
             except Exception: pass
