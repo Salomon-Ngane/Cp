@@ -34,26 +34,51 @@ async def _notify_normal_outcome(context: ContextTypes.DEFAULT_TYPE, outcome: di
                 await context.bot.send_message(chat_id=s["user_id"], text=text, parse_mode="Markdown")
             except Exception:
                 pass
-        return
+def save_ticket(session_id: str, user_id: int, predictions: list):
+    formatted = [{"match_id": str(p["match_id"]), "pick": p["pick"], "odds": float(p.get("odds", 1.0))} for p in predictions]
+    res = supabase.table("tickets").insert({
+        "session_id": session_id, 
+        "user_id": user_id, 
+        "predictions": formatted, 
+        "status": "PENDING"
+    }).execute()
+    return res.data[0]
 
-    ranked = sorted(scores, key=lambda x: (-x["correct"], -x["valid_odds"]))
-    rank_by_user = {s["user_id"]: i + 1 for i, s in enumerate(ranked)}
-    payout_pct = {1: "50%", 2: "38%", 3: "12%"}
-    for s in scores:
-        rank = rank_by_user[s["user_id"]]
-        if rank <= 3 and s["correct"] > 0:
-            text = f"🏆 **PODIUM ! Tu termines #{rank}** 🏆\n\n`{s['correct']}` bons pronostics — ta part de la cagnotte ({payout_pct.get(rank, '')}) a été créditée. 🎉"
-        elif rank <= 3 and s["correct"] == 0:
-            continue  # couvert par outcome["notifications"] (redistribution)
-        else:
-            text = f"📊 **Résultat de l'Arène**\n\nTu termines #{rank} avec `{s['correct']}` bons pronostics. Retente ta chance ! 💪"
-        try:
-            await context.bot.send_message(chat_id=s["user_id"], text=text, parse_mode="Markdown")
-        except Exception:
-            pass
+def create_session(creator_id: int, session_type: str, gross_fee: int, match_count: int, max_participants: int, prize_mode: str, predictions: list):
+    user = get_user_by_id(creator_id)
+    if not user or int(user["coins_balance"]) < gross_fee:
+        return None, "Solde insuffisant pour créer ce duel."
 
+    rake_rate = config.RAKE_1V1 if session_type == "DUEL" else config.RAKE_ARENA
+    net_fee = gross_fee - int(round(gross_fee * rake_rate))
 
-async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session_data = {
+        "creator_id": creator_id,
+        "type": session_type,
+        "gross_entry_fee": gross_fee,
+        "net_entry_fee": net_fee,
+        "match_count": match_count,
+        "max_participants": max_participants,
+        "prize_mode": prize_mode,
+        "status": "WAITING"
+    }
+    
+    try:
+        # Étape 1 : On crée la session
+        session = supabase.table("sessions").insert(session_data).execute().data[0]
+        
+        # Étape 2 : On sauvegarde le ticket associé
+        save_ticket(session["id"], creator_id, predictions)
+        
+        # Étape 3 : SÉCURITÉ FINANCIÈRE -> On débite seulement si les étapes 1 et 2 ont réussi
+        new_balance = int(user["coins_balance"]) - gross_fee
+        supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", creator_id).execute()
+        
+        return session, "Succès"
+    except Exception as e:
+        # Si la base de données plante, la fonction s'arrête et le joueur garde son argent
+        return None, f"Erreur système lors de la création : {str(e)}"
+
     if not is_admin(update.effective_user.id): return
     args = context.args
     if len(args) != 2 or args[1].upper() not in ("HOME", "DRAW", "AWAY", "CANCEL"):
