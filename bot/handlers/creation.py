@@ -13,7 +13,6 @@ from bot.handlers.tickets_view import show_ticket_detail
 logger = logging.getLogger(__name__)
 
 def _safe_float(val, default=0.0) -> float:
-    """Convertit une valeur en float en toute sécurité, même si la valeur est None (NULL SQL)."""
     if val is None:
         return default
     try:
@@ -31,9 +30,12 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if data == "menu_main":
+        # Sécurité : annuler toute attente de saisie
+        update_draft_settings(user_id, {"awaiting_fee": False, "awaiting_arena_max": False})
         await query.edit_message_text("🏠 **Menu Principal**", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
     elif data == "menu_duel":
+        update_draft_settings(user_id, {"awaiting_fee": False, "awaiting_arena_max": False})
         text = "⚔️ **Mode de jeu**\n\nChoisissez comment vous souhaitez parier :"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🥊 Duel 1v1", callback_data="type_DUEL"), InlineKeyboardButton("🏟️ Mode Arena", callback_data="type_ARENA")],
@@ -47,35 +49,23 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         update_draft_settings(user_id, {"session_type": stype})
         if stype == "DUEL":
             update_draft_settings(user_id, {"max_participants": 2, "prize_mode": "WINNER_TAKES_ALL"})
-            await _ask_entry_fee(query)
+            await _ask_entry_fee(update, user_id)
         else:
-            text = "🏟️ **Configuration Arena**\n\nCombien de joueurs maximum pour ce salon ?"
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("4 Joueurs", callback_data="arena_max_4"), InlineKeyboardButton("8 Joueurs", callback_data="arena_max_8")],
-                [InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]
-            ])
+            # Saisie manuelle du nombre de joueurs Arena
+            update_draft_settings(user_id, {"awaiting_arena_max": True})
+            text = "🏟️ **Configuration Arena**\n\nEntrez dans le chat le **nombre maximum de joueurs** pour ce salon (entre 3 et 15) :"
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]])
             await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-
-    elif data.startswith("arena_max_"):
-        mx = int(data.split("_")[2])
-        update_draft_settings(user_id, {"max_participants": mx})
-        text = "🏆 **Mode de Distribution des Prix (Arena)**"
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🥇 Vainqueur unique (100%)", callback_data="arena_prize_WINNER")],
-            [InlineKeyboardButton("🥉 Top 3 (50% / 38% / 12%)", callback_data="arena_prize_TOP3")],
-            [InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]
-        ])
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
     elif data.startswith("arena_prize_"):
         mode = "TOP_3" if data.split("_")[2] == "TOP3" else "WINNER_TAKES_ALL"
         update_draft_settings(user_id, {"prize_mode": mode})
-        await _ask_entry_fee(query)
+        await _ask_entry_fee(update, user_id)
 
     elif data.startswith("fee_"):
         fee = int(data.split("_")[1])
-        update_draft_settings(user_id, {"gross_fee": fee})
-        await _show_sports_selection(query)
+        update_draft_settings(user_id, {"gross_fee": fee, "awaiting_fee": False})
+        await _show_sports_selection(update)
 
     elif data.startswith("sport_"):
         sport = data.split("_")[1]
@@ -86,7 +76,7 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         await _show_matches_for_comp(query, comp_prefix)
 
     elif data == "back_to_sports":
-        await _show_sports_selection(query)
+        await _show_sports_selection(update)
 
     elif data.startswith("bet_"):
         _, mid, pick, odds = data.split("_")
@@ -103,14 +93,13 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         else:
             toggle_cart_item(user_id, mid, pick, float(odds), max_count=None)
             
-        # Rafraîchir l'écran actuel de la compétition
         matches_db = get_matches_by_ids([mid])
         if matches_db:
             m = matches_db[0]
             comp = m.get("sport_title") or m.get("sport") or "Compétition"
             await _show_matches_for_comp(query, comp[:40])
         else:
-            await _show_competitions_for_sport(query, draft.get("current_sport", "Soccer"))
+            await _show_competitions_for_sport(query, draft.get("current_sport", "soccer"))
 
     elif data == "validate_ticket":
         await _process_ticket_creation(query, user_id, context)
@@ -147,28 +136,76 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
             await query.edit_message_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=keyboard, parse_mode="Markdown")
 
 
-async def _ask_entry_fee(query):
-    text = "💰 **Mise d'entrée (Coins)**\n\nChoisissez le montant de la mise pour ce salon :"
+async def handle_creation_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Intercepte les textes libres pour le nombre de joueurs (Arena) et la Mise (Coins)."""
+    user_id = update.effective_user.id
+    draft = get_draft_settings(user_id)
+    
+    if not draft:
+        return
+
+    text_input = update.message.text.strip()
+    
+    # 1. Saisie manuelle : Nombre de joueurs Arena
+    if draft.get("awaiting_arena_max"):
+        if not text_input.isdigit():
+            await update.message.reply_text("❌ Veuillez entrer un nombre valide.")
+            return
+        mx = int(text_input)
+        if not (3 <= mx <= 15):
+            await update.message.reply_text("❌ Le nombre de joueurs en Arena doit être compris entre 3 et 15.")
+            return
+        
+        update_draft_settings(user_id, {"max_participants": mx, "awaiting_arena_max": False})
+        
+        text = "🏆 **Mode de Distribution des Prix (Arena)**"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🥇 Vainqueur unique (100%)", callback_data="arena_prize_WINNER")],
+            [InlineKeyboardButton("🥉 Top 3 (50% / 38% / 12%)", callback_data="arena_prize_TOP3")],
+            [InlineKeyboardButton("⬅️ Annuler", callback_data="menu_duel")]
+        ])
+        await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
+    # 2. Saisie manuelle : Montant de la mise (Coins)
+    if draft.get("awaiting_fee"):
+        if not text_input.isdigit() or int(text_input) <= 0:
+            await update.message.reply_text("❌ Veuillez entrer un montant valide supérieur à 0.")
+            return
+        fee = int(text_input)
+        update_draft_settings(user_id, {"gross_fee": fee, "awaiting_fee": False})
+        await _show_sports_selection(update)
+        return
+
+
+async def _ask_entry_fee(update: Update, user_id: int):
+    update_draft_settings(user_id, {"awaiting_fee": True})
+    text = "💰 **Mise d'entrée (Coins)**\n\nSélectionnez une mise rapide ci-dessous, **ou tapez manuellement le montant** de votre choix dans le chat :"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("100 Coins", callback_data="fee_100"), InlineKeyboardButton("500 Coins", callback_data="fee_500")],
-        [InlineKeyboardButton("1000 Coins", callback_data="fee_1000"), InlineKeyboardButton("5000 Coins", callback_data="fee_5000")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]
     ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-async def _show_sports_selection(query):
+async def _show_sports_selection(update: Update):
     text = "⚽ **Sélection des Matchs**\n\nChoisissez un sport pour composer votre ticket :"
+    # Sécurisation des callbacks en minuscules strictes pour assurer la correspondance en base de données
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚽ Football", callback_data="sport_Soccer"), InlineKeyboardButton("🏀 Basketball", callback_data="sport_Basketball")],
-        [InlineKeyboardButton("🎾 Tennis", callback_data="sport_Tennis")],
+        [InlineKeyboardButton("⚽ Football", callback_data="sport_soccer"), InlineKeyboardButton("🏀 Basketball", callback_data="sport_basketball")],
+        [InlineKeyboardButton("🎾 Tennis", callback_data="sport_tennis")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]
     ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def _show_competitions_for_sport(query, sport):
-    """NOUVEL ÉCRAN : Liste uniquement les compétitions disponibles pour le sport sélectionné."""
     user_id = query.from_user.id
     update_draft_settings(user_id, {"current_sport": sport})
     matches = get_matches_by_sport(sport)
@@ -177,34 +214,31 @@ async def _show_competitions_for_sport(query, sport):
         await query.answer("Aucun match disponible pour ce sport aujourd'hui.", show_alert=True)
         return
     
-    # Extraire les compétitions uniques
     competitions = set()
     for m in matches:
         comp = m.get("sport_title") or m.get("sport") or "Compétition"
         competitions.add(comp)
 
-    text = f"🏆 **Compétitions ({sport})**\n\nChoisissez une ligue ou un tournoi :"
+    emoji = "🏀" if "basket" in sport.lower() else "🎾" if "tennis" in sport.lower() else "⚽"
+    text = f"{emoji} **Compétitions ({sport.capitalize()})**\n\nChoisissez une ligue ou un tournoi :"
     keyboard = []
     
     for comp in sorted(competitions):
-        safe_comp = comp[:40] # Sécurité pour ne pas dépasser la limite de 64 bytes de Telegram
+        safe_comp = comp[:40]
         keyboard.append([InlineKeyboardButton(f"🏆 {comp}", callback_data=f"comp_{safe_comp}")])
 
     keyboard.append([InlineKeyboardButton("⬅️ Retour aux sports", callback_data="back_to_sports")])
-
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def _show_matches_for_comp(query, comp_prefix):
-    """NOUVEL ÉCRAN : Affiche les matchs d'une compétition spécifique."""
     user_id = query.from_user.id
     draft = get_draft_settings(user_id)
-    sport = draft.get("current_sport", "Soccer")
+    sport = draft.get("current_sport", "soccer")
     
     matches = get_matches_by_sport(sport)
     comp_matches = []
     
-    # Filtrer les matchs appartenant à la compétition cliquée
     for m in (matches or []):
         comp = m.get("sport_title") or m.get("sport") or "Compétition"
         if comp.startswith(comp_prefix):
@@ -220,17 +254,17 @@ async def _show_matches_for_comp(query, comp_prefix):
     if joining_sid:
         session = get_session(joining_sid)
         target_count = session.get("match_count", 1) if session else 1
-        header_text = f"🎯 <b>{comp_matches[0].get('sport_title', sport)}</b>\nPronostics ({len(cart)}/{target_count}) :\n\n"
+        header_text = f"🎯 <b>{comp_matches[0].get('sport_title', sport.capitalize())}</b>\nPronostics ({len(cart)}/{target_count}) :\n\n"
         can_validate = (len(cart) == target_count)
     else:
-        header_text = f"🎯 <b>{comp_matches[0].get('sport_title', sport)}</b>\nMatchs sélectionnés : <code>{len(cart)}</code>\n\n"
+        header_text = f"🎯 <b>{comp_matches[0].get('sport_title', sport.capitalize())}</b>\nMatchs sélectionnés : <code>{len(cart)}</code>\n\n"
         can_validate = (len(cart) >= 1)
 
     keyboard = []
     button_count = 0
     
     for m in comp_matches:
-        if button_count >= 85: # Garde la place pour Valider et Retour
+        if button_count >= 85:
             break
             
         try:
@@ -242,7 +276,7 @@ async def _show_matches_for_comp(query, comp_prefix):
             odds_d = _safe_float(m.get("odds_draw"), 0.0)
             odds_a = _safe_float(m.get("odds_away"), 1.9)
 
-            keyboard.append([InlineKeyboardButton(f"⚽ {home} - {away}", callback_data="ignore")])
+            keyboard.append([InlineKeyboardButton(f"⚔️ {home} - {away}", callback_data="ignore")])
             button_count += 1
             
             row = []
@@ -263,7 +297,6 @@ async def _show_matches_for_comp(query, comp_prefix):
 
     if can_validate:
         keyboard.append([InlineKeyboardButton("🚀 Valider mon Ticket", callback_data="validate_ticket")])
-    # Bouton retour qui pointe dynamiquement vers la liste des compétitions de ce sport
     keyboard.append([InlineKeyboardButton("⬅️ Retour aux compétitions", callback_data=f"sport_{sport}")])
 
     await query.edit_message_text(header_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -369,7 +402,8 @@ async def propose_join_duel(message, user_id, session_id, context):
     text = f"⚔️ Vous rejoignez un salon de `{session['gross_entry_fee']}` Coins !\nVeuillez sélectionner vos `{session['match_count']}` pronostics :"
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚽ Choisir des matchs (Football)", callback_data="sport_Soccer")],
-        [InlineKeyboardButton("🏀 Basketball", callback_data="sport_Basketball")]
+        [InlineKeyboardButton("⚽ Choisir des matchs (Football)", callback_data="sport_soccer")],
+        [InlineKeyboardButton("🏀 Basketball", callback_data="sport_basketball")],
+        [InlineKeyboardButton("🎾 Tennis", callback_data="sport_tennis")]
     ])
     await message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
