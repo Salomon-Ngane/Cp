@@ -27,6 +27,10 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
     data = query.data
     user_id = query.from_user.id
 
+    # Boutons purement visuels (étiquettes de compétitions/matchs)
+    if data == "ignore":
+        return
+
     if data == "menu_main":
         await query.edit_message_text("🏠 **Menu Principal**", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
@@ -157,6 +161,7 @@ async def _show_matches_for_sport(query, sport):
     user_id = query.from_user.id
     update_draft_settings(user_id, {"current_sport": sport})
     matches = get_matches_by_sport(sport)
+    
     if not matches:
         await query.answer("Aucun match disponible pour ce sport aujourd'hui.", show_alert=True)
         return
@@ -168,47 +173,69 @@ async def _show_matches_for_sport(query, sport):
     if joining_sid:
         session = get_session(joining_sid)
         target_count = session.get("match_count", 1) if session else 1
-        header_text = f"⚽ **Matchs disponibles ({sport})**\nSélectionnez vos pronostics ({len(cart)}/{target_count}) :\n\n"
+        header_text = f"🎯 **Sélection ({sport})**\nPronostics ({len(cart)}/{target_count}) :\n"
         can_validate = (len(cart) == target_count)
     else:
-        header_text = f"⚽ **Matchs disponibles ({sport})**\nMatchs sélectionnés : `{len(cart)}` (Cliquez sur Valider quand vous avez fini)\n\n"
+        header_text = f"🎯 **Sélection ({sport})**\nMatchs dans le panier : `{len(cart)}` (Validez quand vous avez fini)\n"
         can_validate = (len(cart) >= 1)
 
-    text = header_text
-    keyboard = []
-    
+    # Groupement des matchs par compétition
+    matches_by_comp = {}
     for m in matches:
-        try:
-            mid = str(m["api_match_id"])
-            home = str(m.get("home_team", "Équipe A"))
-            away = str(m.get("away_team", "Équipe B"))
-            
-            # SÉCURISATION DES COTES : _safe_float empêche tout crash sur les valeurs NULL / None
-            odds_h = _safe_float(m.get("odds_home"), 1.9)
-            odds_d = _safe_float(m.get("odds_draw"), 0.0)  # 0.0 pour masquer le Nul au Tennis/Basket
-            odds_a = _safe_float(m.get("odds_away"), 1.9)
+        # On utilise le sport_title s'il existe (ex: "Ligue 1"), sinon le nom du sport
+        comp = m.get("sport_title") or m.get("sport") or "Compétition"
+        matches_by_comp.setdefault(comp, []).append(m)
 
-            text += f"🔹 <b>{home} vs {away}</b>\n"
+    keyboard = []
+    button_count = 0
+
+    for comp, comp_matches in matches_by_comp.items():
+        if button_count >= 85: # Sécurité : Garde de la place pour Valider et Retour (100 max)
+            break
             
-            row = []
-            for label, pick, odd in [("1", "HOME", odds_h), ("N", "DRAW", odds_d), ("2", "AWAY", odds_a)]:
-                if odd <= 1.0: 
-                    continue  # Masque automatiquement le match nul pour le Tennis/Basket (odd = 0.0)
-                is_selected = (cart.get(mid) == pick)
-                prefix = "✅ " if is_selected else ""
-                row.append(InlineKeyboardButton(f"{prefix}{label} ({odd})", callback_data=f"bet_{mid}_{pick}_{odd}"))
-            
-            if row:
-                keyboard.append(row)
-        except Exception as e:
-            logger.error(f"Erreur d'affichage du match {m.get('api_match_id')}: {e}")
-            continue
+        # 1. Étiquette de la compétition
+        keyboard.append([InlineKeyboardButton(f"🏆 {comp}", callback_data="ignore")])
+        button_count += 1
+        
+        for m in comp_matches:
+            if button_count >= 85:
+                break
+                
+            try:
+                mid = str(m["api_match_id"])
+                home = str(m.get("home_team", "Équipe A"))
+                away = str(m.get("away_team", "Équipe B"))
+                
+                odds_h = _safe_float(m.get("odds_home"), 1.9)
+                odds_d = _safe_float(m.get("odds_draw"), 0.0)
+                odds_a = _safe_float(m.get("odds_away"), 1.9)
+
+                # 2. Étiquette du Match
+                keyboard.append([InlineKeyboardButton(f"⚽ {home} - {away}", callback_data="ignore")])
+                button_count += 1
+                
+                # 3. Ligne des Pronostics
+                row = []
+                for label, pick, odd in [("1", "HOME", odds_h), ("N", "DRAW", odds_d), ("2", "AWAY", odds_a)]:
+                    if odd <= 1.0: 
+                        continue
+                    is_selected = (cart.get(mid) == pick)
+                    prefix = "✅ " if is_selected else ""
+                    row.append(InlineKeyboardButton(f"{prefix}{label} ({odd})", callback_data=f"bet_{mid}_{pick}_{odd}"))
+                
+                if row:
+                    keyboard.append(row)
+                    button_count += len(row)
+                    
+            except Exception as e:
+                logger.error(f"Erreur d'affichage du match {m.get('api_match_id')}: {e}")
+                continue
 
     if can_validate:
         keyboard.append([InlineKeyboardButton("🚀 Valider mon Ticket", callback_data="validate_ticket")])
     keyboard.append([InlineKeyboardButton("⬅️ Changer de sport", callback_data="back_to_sports")])
 
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await query.edit_message_text(header_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def _refresh_match_selection_view(query, user_id):
