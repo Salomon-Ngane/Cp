@@ -171,3 +171,23 @@ async def fetch_live_scores(client: httpx.AsyncClient, api_key: str, sport_key: 
         })
 
     return results
+    # =====================================================================
+# LECTURE DES MATCHS DEPUIS SUPABASE (Pour creation.py, tickets_view.py, etc.)
+# =====================================================================
+from database.connection import supabase
+
+def get_matches_by_sport(sport_key: str = None) -> list:
+    """Récupère les matchs disponibles dans la base de données."""
+    query = supabase.table("matches").select("*")
+    if sport_key and sport_key != "ALL":
+        query = query.eq("sport", sport_key)
+    res = query.execute().data or []
+    return res
+
+def get_matches_by_ids(match_ids: list) -> list:
+    """Récupère les matchs par leurs identifiants Supabase."""
+    if not match_ids:
+        return []
+    res = supabase.table("matches").select("*").in_("id", match_ids).execute().data or []
+    return res
+
