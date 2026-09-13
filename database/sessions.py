@@ -4,6 +4,35 @@ from database.connection import supabase
 from database.users import credit_balance, get_user_by_id, update_api_quota
 import config
 from services import odds_api
+from datetime import datetime, timezone, timedelta
+
+def get_estimated_end_time(matches: list) -> datetime:
+    """Calcule l'heure de fin estimée en se basant sur le coup d'envoi le plus tardif + la durée du sport."""
+    max_end = datetime.now(timezone.utc)
+    has_future = False
+    
+    for m in matches:
+        start_str = m.get("commence_time")
+        if not start_str: continue
+        try:
+            # Conversion de l'heure ISO de The Odds API
+            start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            sport = str(m.get("sport", "")).lower()
+            
+            # Marges de durée par sport
+            if "basketball" in sport: duration = 150
+            elif "tennis" in sport: duration = 180
+            else: duration = 120 # Football par défaut
+            
+            end_time = start_time + timedelta(minutes=duration)
+            if not has_future or end_time > max_end:
+                max_end = end_time
+                has_future = True
+        except:
+            pass
+            
+    return max_end
+
 
 # --- MATCHS ---
 
