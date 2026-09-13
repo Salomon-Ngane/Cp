@@ -1,8 +1,8 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 import config
-from database.users import get_or_create_user
-from database.sessions import cancel_expired_sessions, get_weekly_leaderboard
+from services.user_service import get_or_create_user
+from services.session_service import cancel_expired_sessions, get_weekly_leaderboard
 from bot.ui import main_menu_keyboard
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -23,7 +23,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         admin_msg = (
             f"👤 **NOUVEL UTILISATEUR INSCRIT**\n\n"
             f"Nom : {db_user['username']}\n"
-            f"🆔 Code Joueur : `{db_user['player_code']}`\n"
+            f"🆔 Code Joueur : `{db_user.get('user_code', db_user.get('player_code', 'N/A'))}`\n"
             f"Telegram ID : `{user.id}`"
         )
         await context.bot.send_message(chat_id=config.ADMIN_TELEGRAM_ID, text=admin_msg, parse_mode="Markdown")
@@ -48,12 +48,13 @@ async def user_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_account_menu(query, user_id):
     db_user = get_or_create_user(user_id, query.from_user.username or query.from_user.first_name)
-    recharge_link = f"https://t.me/{config.ADMIN_USERNAME}?text=Recharge%20pour%20mon%20ID%20:%20{db_user['player_code']}"
+    code = db_user.get('user_code', db_user.get('player_code', 'N/A'))
+    recharge_link = f"https://t.me/{config.ADMIN_USERNAME}?text=Recharge%20pour%20mon%20ID%20:%20{code}"
     
     text = (
         f"💳 **Mon Compte — Clashsport**\n\n"
         f"👤 Utilisateur : {db_user['username']}\n"
-        f"🆔 Code Joueur (ID) : **`{db_user.get('player_code', 'N/A')}`**\n"
+        f"🆔 Code Joueur (ID) : **`{code}`**\n"
         f"💰 Solde : `{db_user['coins_balance']}` Coins\n\n"
         "Communiquez votre Code Joueur pour vos transactions et recharges."
     )
