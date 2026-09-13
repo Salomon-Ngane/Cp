@@ -10,7 +10,7 @@ from services.session_service import (
     get_matches_by_ids, 
     get_estimated_end_time
 )
-from database.users import get_user_by_id
+from services.user_service import get_user_by_id
 from bot.ui import main_menu_keyboard
 
 logger = logging.getLogger(__name__)
