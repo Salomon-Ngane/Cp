@@ -13,7 +13,8 @@ from bot.handlers.admin import (
 )
 from bot.handlers.tickets_view import user_tickets, user_live
 from bot.handlers.creation import handle_creation_callback, handle_creation_text_input
-from database.sessions import cancel_expired_sessions
+from services.session_service import cancel_expired_sessions
+
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ telegram_app.add_handler(CommandHandler("live", user_live))
 telegram_app.add_handler(CommandHandler("give", admin_give))
 telegram_app.add_handler(CommandHandler("take", admin_take))
 telegram_app.add_handler(CommandHandler("stats", admin_stats))
+telegram_app.add_handler(CommandHandler("reward", admin_reward))
 telegram_app.add_handler(CommandHandler("sync", admin_sync))
 telegram_app.add_handler(CommandHandler("sweep", admin_sweep))
 telegram_app.add_handler(CommandHandler("alert", admin_alert))
