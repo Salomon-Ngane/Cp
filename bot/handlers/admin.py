@@ -1,211 +1,192 @@
-import re
+import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 import config
 from database.connection import supabase
-from database.users import admin_take_coins, get_user_by_id, get_all_users, get_detailed_stats, get_api_quota
-from database.sessions import set_match_result, find_resolvable_sessions, resolve_session, sync_matches_from_api_async, fetch_and_update_scores_for_resolution
+from database.users import get_user_by_id, get_user_by_code, update_user_balance
+from database.sessions import (
+    get_session, 
+    cancel_expired_sessions, 
+    distribute_top_rewards,
+    get_tickets_for_session
+)
+
+logger = logging.getLogger(__name__)
 
 def is_admin(user_id: int) -> bool:
+    """Vérifie si l'utilisateur est l'administrateur configuré."""
     return user_id == config.ADMIN_TELEGRAM_ID
 
-def _clean_number(raw: str) -> str:
-    return re.sub(r"[^\d.]", "", raw)
-
-async def _notify_normal_outcome(context: ContextTypes.DEFAULT_TYPE, outcome: dict):
-    if outcome.get("is_draw_refund"):
-        return
-
-    session_type = outcome["type"]
-    scores = outcome["scores"]
-    pot = outcome["pot"]
-    winner_id = outcome.get("winner_id")
-
-    if session_type == "DUEL":
-        for s in scores:
-            other = next((x for x in scores if x["user_id"] != s["user_id"]), {"correct": 0})
-            if s["user_id"] == winner_id:
-                text = f"🏆 **VICTOIRE !** 🏆\n\n`{s['correct']}` bons pronostics contre `{other['correct']}` — tu rafles la mise !\n💰 `+{pot}` Coins."
-            else:
-                text = f"💥 **DÉFAITE...** 💥\n\n`{s['correct']}` contre `{other['correct']}`. La revanche t'attend ! 🔁"
-            try:
-                await context.bot.send_message(chat_id=s["user_id"], text=text, parse_mode="Markdown")
-            except Exception:
-                pass
-        return
-
-    ranked = sorted(scores, key=lambda x: (-x["correct"], -x["valid_odds"]))
-    rank_by_user = {s["user_id"]: i + 1 for i, s in enumerate(ranked)}
-    payout_pct = {1: "50%", 2: "38%", 3: "12%"}
-    for s in scores:
-        rank = rank_by_user[s["user_id"]]
-        if rank <= 3 and s["correct"] > 0:
-            text = f"🏆 **PODIUM ! Tu termines #{rank}** 🏆\n\n`{s['correct']}` bons pronostics — ta part de la cagnotte ({payout_pct.get(rank, '')}) a été créditée. 🎉"
-        elif rank <= 3 and s["correct"] == 0:
-            continue
-        else:
-            text = f"📊 **Résultat de l'Arène**\n\nTu termines #{rank} avec `{s['correct']}` bons pronostics. Retente ta chance ! 💪"
-        try:
-            await context.bot.send_message(chat_id=s["user_id"], text=text, parse_mode="Markdown")
-        except Exception:
-            pass
-
-async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    args = context.args
-    if len(args) != 2 or args[1].upper() not in ("HOME", "DRAW", "AWAY", "CANCEL"):
-        await update.message.reply_text("❌ Usage : /resolve [api_match_id] [HOME|DRAW|AWAY|CANCEL]")
-        return
-
-    # CORRECTION : On ne nettoie plus l'ID avec _clean_number pour conserver les lettres de The Odds API
-    api_match_id = args[0].strip()
-    result = args[1].upper()
-    set_match_result(api_match_id, result)
-
-    resolvable = find_resolvable_sessions(api_match_id)
-    resolved_count = 0
-    for session in resolvable:
-        outcome = resolve_session(session["id"])
-        if outcome:
-            resolved_count += 1
-            await _notify_normal_outcome(context, outcome)
-            for notif in outcome.get("notifications", []):
-                try: await context.bot.send_message(chat_id=notif["user_id"], text=notif["text"])
-                except Exception: pass
-
-            if outcome.get("is_draw_refund"):
-                for s_score in outcome.get("scores", []):
-                    try: await context.bot.send_message(chat_id=s_score["user_id"], text="🤝 Égalité parfaite ! Votre mise vous a été intégralement remboursée.")
-                    except Exception: pass
-
-    await update.message.reply_text(f"✅ Résultat enregistré. 🏁 {resolved_count} session(s) tranchée(s).")
-
-async def admin_resolve_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    if not context.args:
-        await update.message.reply_text("❌ Usage : /resolve_session [id_de_la_session]")
-        return
-    
-    session_id = context.args[0]
-    session = supabase.table("sessions").select("*").eq("id", session_id).execute()
-    if not session.data:
-        await update.message.reply_text("❌ Session introuvable.")
-        return
-    
-    sess_obj = session.data[0]
-    if sess_obj["status"] != "IN_PROGRESS":
-        await update.message.reply_text(f"⚠️ La session doit être 'IN_PROGRESS' (Actuelle : {sess_obj['status']}).")
-        return
-
-    msg = await update.message.reply_text("⏳ Récupération des scores finaux depuis The Odds API (jusqu'à J-3)...")
-    success, info_msg = await fetch_and_update_scores_for_resolution(session_id)
-    
-    outcome = resolve_session(session_id)
-    if outcome:
-        await _notify_normal_outcome(context, outcome)
-        for notif in outcome.get("notifications", []):
-            try: await context.bot.send_message(chat_id=notif["user_id"], text=notif["text"])
-            except Exception: pass
-            
-        if outcome.get("is_draw_refund"):
-            for s_score in outcome.get("scores", []):
-                try: await context.bot.send_message(chat_id=s_score["user_id"], text="🤝 Égalité parfaite ! Remboursement effectué.")
-                except Exception: pass
-                
-        await msg.edit_text(f"✅ Session tranchée !\nℹ️ {info_msg}\n💰 Cagnotte distribuée.")
-    else:
-        await msg.edit_text(f"⚠️ {info_msg}\nTous les matchs ne sont pas terminés.")
-
 async def admin_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /give [ID_ou_Code] [Montant] : Crédite des Coins à un joueur."""
     if not is_admin(update.effective_user.id): return
+
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text("❌ Usage : /give [id_ou_code] [montant]")
+        await update.message.reply_text("⚠️ Usage : `/give [telegram_id_ou_code] [montant]`", parse_mode="Markdown")
         return
-    
-    target_raw, amount_str = args[0], _clean_number(args[1])
-    try:
-        amount = int(amount_str)
-        if target_raw.isdigit() and len(target_raw) == 5:
-            res = supabase.table("users").select("*").eq("player_code", target_raw).execute().data
-            user = res[0] if res else None
-        else:
-            user = get_user_by_id(int(target_raw))
 
-        if not user:
-            await update.message.reply_text("❌ Utilisateur introuvable.")
-            return
+    target_input, amount_str = args[0], args[1]
+    if not amount_str.isdigit():
+        await update.message.reply_text("❌ Le montant doit être un nombre entier positif.")
+        return
 
-        from database.users import credit_balance
-        new_bal = credit_balance(user["telegram_id"], amount)
-        await update.message.reply_text(f"✅ `{amount}` Coins ajoutés à **{user['username']}**. Nouveau solde : `{new_bal}`.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur : {str(e)}")
+    amount = int(amount_str)
+    user = get_user_by_code(target_input.upper()) if not target_input.isdigit() else get_user_by_id(int(target_input))
+
+    if not user:
+        await update.message.reply_text("❌ Utilisateur introuvable.")
+        return
+
+    update_user_balance(user["telegram_id"], amount)
+    await update.message.reply_text(f"✅ `{amount}` Coins ajoutés au compte de **{user.get('username', 'Joueur')}**.", parse_mode="Markdown")
 
 async def admin_take(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /take [ID_ou_Code] [Montant] : Prélève des Coins à un joueur."""
     if not is_admin(update.effective_user.id): return
+
     args = context.args
     if len(args) < 2:
-        await update.message.reply_text("❌ Usage : /take [id_ou_code] [montant]")
+        await update.message.reply_text("⚠️ Usage : `/take [telegram_id_ou_code] [montant]`", parse_mode="Markdown")
         return
-    try:
-        target_raw, amount = args[0], int(_clean_number(args[1]))
-        if target_raw.isdigit() and len(target_raw) == 5:
-            res = supabase.table("users").select("*").eq("player_code", target_raw).execute().data
-            user = res[0] if res else None
-        else:
-            user = get_user_by_id(int(target_raw))
 
-        if not user:
-            await update.message.reply_text("❌ Utilisateur introuvable.")
-            return
+    target_input, amount_str = args[0], args[1]
+    if not amount_str.isdigit():
+        await update.message.reply_text("❌ Le montant doit être un nombre entier.")
+        return
 
-        new_bal = admin_take_coins(user["telegram_id"], amount)
-        await update.message.reply_text(f"✅ Prélèvement effectué. Nouveau solde : `{new_bal}`.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur : {str(e)}")
+    amount = int(amount_str)
+    user = get_user_by_code(target_input.upper()) if not target_input.isdigit() else get_user_by_id(int(target_input))
+
+    if not user:
+        await update.message.reply_text("❌ Utilisateur introuvable.")
+        return
+
+    update_user_balance(user["telegram_id"], -amount)
+    await update.message.reply_text(f"✅ `{amount}` Coins retirés du compte de **{user.get('username', 'Joueur')}**.", parse_mode="Markdown")
+
+async def admin_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Commande /reward [categorie] [periode] [montant] [+ item X]
+    Exemple: /reward network week 10000 + item 2
+    """
+    if not is_admin(update.effective_user.id): return
+
+    args = context.args
+    if len(args) < 3:
+        usage_text = (
+            "⚠️ **Usage :** `/reward [categorie] [periode] [montant] [+ item X]`\n"
+            "🔹 *Catégories :* `winrate`, `network`, `volume`\n"
+            "🔹 *Périodes :* `day`, `week`, `month`\n"
+            "🔹 *Exemple :* `/reward network week 10000 + item 2`"
+        )
+        await update.message.reply_text(usage_text, parse_mode="Markdown")
+        return
+
+    category = args[0].lower()
+    period = args[1].lower()
+    amount_str = args[2]
+
+    if category not in ["winrate", "network", "volume"] or period not in ["day", "week", "month"] or not amount_str.isdigit():
+        await update.message.reply_text("❌ Paramètres invalides. Vérifiez la catégorie, la période et le montant.")
+        return
+
+    amount = int(amount_str)
+    bonus_item = None
+
+    # Détection de l'ajout d'un Item (ex: "+ item 2")
+    rest_of_args = " ".join(args[3:]).lower()
+    if "+ item 1" in rest_of_args: bonus_item = 1
+    elif "+ item 2" in rest_of_args: bonus_item = 2
+    elif "+ item 3" in rest_of_args: bonus_item = 3
+
+    # Lancement de la distribution
+    success, summary = distribute_top_rewards(category, period, amount, bonus_item)
+
+    if not success:
+        await update.message.reply_text(summary) # Affiche le message d'erreur (ex: volume insuffisant)
+        return
+
+    text = f"🏆 **DISTRIBUTION EFFECTUÉE !**\n\n🎯 Catégorie : `{category.upper()}` | 📅 Période : `{period.upper()}`\n💰 Cagnotte totale : `{amount}` Coins\n\n{summary}"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def admin_sweep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /sweep : Nettoie les salons expirés (+24h)."""
+    if not is_admin(update.effective_user.id): return
+    cancel_expired_sessions()
+    await update.message.reply_text("🧹 Nettoyage des salons expirés effectué. Les créateurs ont été remboursés.")
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /stats : Tableau de bord."""
     if not is_admin(update.effective_user.id): return
-    stats = get_detailed_stats()
-    quota = get_api_quota()
-    
+
+    users_count = len(supabase.table("users").select("telegram_id").execute().data or [])
+    active_sessions = len(supabase.table("sessions").select("id").eq("status", "IN_PROGRESS").execute().data or [])
+    don_account = get_user_by_id(0)
+    don_balance = don_account.get("coins_balance", 0) if don_account else 0
+
     text = (
-        "📊 **STATISTIQUES DE LA PLATEFORME**\n\n"
-        f"👥 Joueurs inscrits : `{stats.get('total_users', 0)}`\n"
-        f"💰 Coins en circulation : `{stats.get('total_coins', 0)}`\n"
-        f"🎟️ Tickets créés : `{stats.get('total_tickets', 0)}`\n"
-        f"🟡 Salons en attente : `{stats.get('waiting_sessions', 0)}`\n"
-        f"🔵 Duels / Arenas en cours : `{stats.get('active_sessions', 0)}`\n"
-        f"🏁 Sessions terminées : `{stats.get('completed_sessions', 0)}`\n\n"
-        f"🔌 **Quota The Odds API restant :** `{quota}`"
+        "📊 **Statistiques Générales Clashsport**\n\n"
+        f"👤 Joueurs inscrits : `{users_count}`\n"
+        f"🔴 Sessions en cours : `{active_sessions}`\n"
+        f"❤️ Solde Don Solidaire : `{don_balance}` Coins"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def admin_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_resolve_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /resolve_session [code_session_7_char] [WINNER_ID_ou_DRAW]"""
     if not is_admin(update.effective_user.id): return
-    await update.message.reply_text("⏳ Synchronisation avec Odds-API en cours...")
-    count, msg = await sync_matches_from_api_async()
-    await update.message.reply_text(f"🔄 Résultat : {msg}")
 
-async def admin_sweep(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return
-    from database.sessions import cancel_expired_sessions
-    cancel_expired_sessions()
-    await update.message.reply_text("🧹 Nettoyage des sessions expirées (>24h) effectué.")
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("⚠️ Usage : `/resolve_session [code_session] [winner_id|DRAW]`", parse_mode="Markdown")
+        return
+
+    session_code, outcome = args[0].upper(), args[1].upper()
+    session = get_session(session_code)
+
+    if not session:
+        await update.message.reply_text("❌ Session introuvable.")
+        return
+
+    tickets = get_tickets_for_session(session["id"])
+    pot = session["gross_entry_fee"] * len(tickets)
+
+    if outcome == "DRAW":
+        refund = session["gross_entry_fee"]
+        for t in tickets:
+            update_user_balance(t["user_id"], refund)
+            supabase.table("tickets").update({"status": "CANCELLED"}).eq("id", t["id"]).execute()
+        supabase.table("sessions").update({"status": "CANCELLED"}).eq("id", session["id"]).execute()
+        await update.message.reply_text(f"⚖️ Session `{session_code}` annulée. Joueurs remboursés.")
+    else:
+        winner_id = int(outcome)
+        net_pot = int(pot * 0.92) # 8% de rake
+        update_user_balance(winner_id, net_pot)
+        
+        for t in tickets:
+            status = "WON" if t["user_id"] == winner_id else "LOST"
+            supabase.table("tickets").update({"status": status}).eq("id", t["id"]).execute()
+            
+        supabase.table("sessions").update({"status": "COMPLETED"}).eq("id", session["id"]).execute()
+        await update.message.reply_text(f"✅ Session `{session_code}` tranchée. Vainqueur `{winner_id}` crédité de `{net_pot}` Coins.")
 
 async def admin_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /alert [Message]"""
     if not is_admin(update.effective_user.id): return
     msg_text = " ".join(context.args)
     if not msg_text:
-        await update.message.reply_text("❌ Usage : /alert [message]")
+        await update.message.reply_text("⚠️ Usage : `/alert [Votre message ici]`", parse_mode="Markdown")
         return
-    
-    users = get_all_users()
-    sent = 0
-    for u in users:
+
+    all_users = supabase.table("users").select("telegram_id").execute().data or []
+    sent_count = 0
+    for u in all_users:
+        uid = u["telegram_id"]
+        if uid == 0: continue
         try:
-            await context.bot.send_message(chat_id=u["telegram_id"], text=f"📢 **ANNONCE CLASHSPORT**\n\n{msg_text}", parse_mode="Markdown")
-            sent += 1
+            await context.bot.send_message(chat_id=uid, text=f"📢 **ANNONCE CLASHSPORT**\n\n{msg_text}", parse_mode="Markdown")
+            sent_count += 1
         except Exception: pass
-    await update.message.reply_text(f"📢 Diffusé à {sent}/{len(users)} joueurs.")
+
+    await update.message.reply_text(f"✅ Annonce envoyée à `{sent_count}` joueurs.")
