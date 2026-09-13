@@ -136,7 +136,7 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         await show_ticket_detail(query, sid, tab)
 
     elif data == "my_tickets":
-    from services.session_service import cancel_expired_sessions, get_user_sessions
+    from bot.handlers.tickets_view import _tickets_keyboard
 
         from bot.handlers.tickets_view import _tickets_keyboard
         cancel_expired_sessions()
