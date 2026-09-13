@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 from database.connection import supabase
 from services.user_service import get_user_by_id, credit_balance
 
+
 def get_session(session_id: str):
     res = supabase.table("sessions").select("*").eq("id", session_id).execute()
     return res.data[0] if res.data else None
@@ -66,3 +67,36 @@ def get_matches_by_ids(match_ids: list):
     ids = [str(mid) for mid in match_ids]
     response = supabase.table("matches").select("*").in_("api_match_id", ids).execute()
     return response.data
+    def cancel_expired_sessions():
+    """Scanne et annule les sessions expirées en attente (>24h) et rembourse les participants."""
+    expiration_date = (datetime.now(timezone.utc) - timedelta(hours=config.SESSION_EXPIRATION_HOURS)).isoformat()
+    expired = supabase.table("sessions").select("*").eq("status", "WAITING").lte("created_at", expiration_date).execute().data
+    
+    for session in expired:
+        tickets = get_tickets_for_session(session["id"])
+        for t in tickets:
+            credit_balance(t["user_id"], session["gross_entry_fee"])
+        supabase.table("sessions").update({"status": "CANCELLED"}).eq("id", session["id"]).execute()
+        supabase.table("tickets").update({"status": "CANCELLED"}).eq("session_id", session["id"]).execute()
+
+
+def get_weekly_leaderboard(limit: int = 10) -> list:
+    """Récupère le classement hebdomadaire basé sur les victoires et les gains."""
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    sessions = supabase.table("sessions").select("*").eq("status", "COMPLETED").gte("created_at", week_ago).not_.is_("winner_id", "null").execute().data
+    tally = {}
+    for s in sessions:
+        winner = s["winner_id"]
+        pot = s["net_entry_fee"] * s.get("max_participants", 2)
+        entry = tally.setdefault(winner, {"wins": 0, "coins_won": 0})
+        entry["wins"] += 1
+        entry["coins_won"] += pot
+
+    ranked = sorted(tally.items(), key=lambda x: (-x[1]["wins"], -x[1]["coins_won"]))[:limit]
+    leaderboard = []
+    for telegram_id, stats in ranked:
+        user = get_user_by_id(telegram_id)
+        username = (user["username"] if user and user.get("username") else None) or f"Joueur {telegram_id}"
+        leaderboard.append({"telegram_id": telegram_id, "username": username, "wins": stats["wins"], "coins_won": stats["coins_won"]})
+    return leaderboard
+
