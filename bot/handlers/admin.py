@@ -1,16 +1,14 @@
-import re
 from telegram import Update
 from telegram.ext import ContextTypes
 import config
 from database.connection import supabase
-from database.users import admin_take_coins, get_user_by_id, get_all_users, get_detailed_stats, get_api_quota
-from database.sessions import set_match_result, find_resolvable_sessions, resolve_session, sync_matches_from_api_async, fetch_and_update_scores_for_resolution
+
+# --- NOUVEAUX IMPORTS (Architecture Services) ---
+from services.user_service import admin_take_coins, get_user_by_id, get_user_by_code, get_all_users, get_detailed_stats, credit_balance, award_item
+from services.session_service import set_match_result, find_resolvable_sessions, resolve_session, sync_matches_from_api_async, fetch_and_update_scores_for_resolution, get_api_quota
 
 def is_admin(user_id: int) -> bool:
     return user_id == config.ADMIN_TELEGRAM_ID
-
-def _clean_number(raw: str) -> str:
-    return re.sub(r"[^\d.]", "", raw)
 
 async def _notify_normal_outcome(context: ContextTypes.DEFAULT_TYPE, outcome: dict):
     if outcome.get("is_draw_refund"):
@@ -57,7 +55,6 @@ async def admin_resolve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Usage : /resolve [api_match_id] [HOME|DRAW|AWAY|CANCEL]")
         return
 
-    # CORRECTION : On ne nettoie plus l'ID avec _clean_number pour conserver les lettres de The Odds API
     api_match_id = args[0].strip()
     result = args[1].upper()
     set_match_result(api_match_id, result)
@@ -123,22 +120,20 @@ async def admin_give(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Usage : /give [id_ou_code] [montant]")
         return
     
-    target_raw, amount_str = args[0], _clean_number(args[1])
+    target_raw = args[0].strip().upper()
     try:
-        amount = int(amount_str)
-        if target_raw.isdigit() and len(target_raw) == 5:
-            res = supabase.table("users").select("*").eq("player_code", target_raw).execute().data
-            user = res[0] if res else None
-        else:
-            user = get_user_by_id(int(target_raw))
+        amount = int(args[1])
+        # Détection dynamique : code alphanumérique (7) vs Telegram ID
+        user = get_user_by_code(target_raw) if len(target_raw) == 7 else get_user_by_id(int(target_raw))
 
         if not user:
             await update.message.reply_text("❌ Utilisateur introuvable.")
             return
 
-        from database.users import credit_balance
         new_bal = credit_balance(user["telegram_id"], amount)
         await update.message.reply_text(f"✅ `{amount}` Coins ajoutés à **{user['username']}**. Nouveau solde : `{new_bal}`.")
+    except ValueError:
+        await update.message.reply_text("❌ Le montant ou l'ID est invalide.")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur : {str(e)}")
 
@@ -148,13 +143,12 @@ async def admin_take(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 2:
         await update.message.reply_text("❌ Usage : /take [id_ou_code] [montant]")
         return
+        
+    target_raw = args[0].strip().upper()
     try:
-        target_raw, amount = args[0], int(_clean_number(args[1]))
-        if target_raw.isdigit() and len(target_raw) == 5:
-            res = supabase.table("users").select("*").eq("player_code", target_raw).execute().data
-            user = res[0] if res else None
-        else:
-            user = get_user_by_id(int(target_raw))
+        amount = int(args[1])
+        # Détection dynamique : code alphanumérique (7) vs Telegram ID
+        user = get_user_by_code(target_raw) if len(target_raw) == 7 else get_user_by_id(int(target_raw))
 
         if not user:
             await update.message.reply_text("❌ Utilisateur introuvable.")
@@ -162,6 +156,8 @@ async def admin_take(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         new_bal = admin_take_coins(user["telegram_id"], amount)
         await update.message.reply_text(f"✅ Prélèvement effectué. Nouveau solde : `{new_bal}`.")
+    except ValueError:
+        await update.message.reply_text("❌ Le montant ou l'ID est invalide.")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur : {str(e)}")
 
@@ -190,7 +186,8 @@ async def admin_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_sweep(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
-    from database.sessions import cancel_expired_sessions
+    # Mise à jour de l'import interne pour correspondre à la nouvelle architecture
+    from services.session_service import cancel_expired_sessions
     cancel_expired_sessions()
     await update.message.reply_text("🧹 Nettoyage des sessions expirées (>24h) effectué.")
 
@@ -209,3 +206,62 @@ async def admin_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent += 1
         except Exception: pass
     await update.message.reply_text(f"📢 Diffusé à {sent}/{len(users)} joueurs.")
+
+async def admin_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Usage: /reward [winrate|network|volume] [24h|7d|30d] [pot_amount] [item_id_optional]
+    Distribue la cagnotte au Top 5 et les items au Top 10.
+    """
+    if not is_admin(update.effective_user.id): return
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text("❌ Usage : /reward [category] [period] [amount] [item_id_optional]")
+        return
+        
+    category, period = args[0].lower(), args[1].lower()
+    try:
+        pot_amount = int(args[2])
+        bonus_item_id = int(args[3]) if len(args) == 4 else None
+    except ValueError:
+        await update.message.reply_text("❌ Le montant et l'ID de l'item doivent être des nombres entiers.")
+        return
+
+    from services.session_service import get_dynamic_leaderboard
+    leaderboard = get_dynamic_leaderboard(category, period, limit=10)
+    
+    if not leaderboard:
+        await update.message.reply_text("⚠️ Aucun joueur éligible pour cette période/catégorie.")
+        return
+
+    payouts = [0.40, 0.25, 0.18, 0.10, 0.07]
+    report = f"🏆 **RÉCOMPENSES DISTRIBUÉES** ({category.upper()} - {period.upper()})\n\n"
+    
+    for idx, player in enumerate(leaderboard):
+        user_id = player["telegram_id"]
+        rank = idx + 1
+        
+        # 1. Distribution des Coins (Top 5)
+        if rank <= 5:
+            coins_won = int(pot_amount * payouts[idx])
+            credit_balance(user_id, coins_won)
+            report += f"#{rank} {player['username']} : `{coins_won}` Coins\n"
+        
+        # 2. Distribution de l'Item 1 (+0.5 Cote) pour les rangs 6 à 10
+        if 6 <= rank <= 10:
+            award_item(user_id, item_type=1)
+            report += f"#{rank} {player['username']} : Item 1 (+0.5 Cote)\n"
+            
+        # 3. Distribution de l'Item Bonus (Top 10 global) si spécifié
+        if bonus_item_id:
+            award_item(user_id, item_type=bonus_item_id)
+            
+        # Notification individuelle
+        try:
+            msg = f"🎉 **RÉCOMPENSE CLASSEMENT** 🎉\nTu as terminé #{rank} de la catégorie {category.upper()} !"
+            if rank <= 5: msg += f"\n💰 Tu as reçu {coins_won} Coins."
+            if 6 <= rank <= 10: msg += "\n🎒 Un Item 1 (+0.5 Cote) a été ajouté à ton sac."
+            if bonus_item_id: msg += f"\n🎁 Objet spécial (Item {bonus_item_id}) reçu !"
+            await context.bot.send_message(chat_id=user_id, text=msg)
+        except Exception: pass
+            
+    await update.message.reply_text(report)
