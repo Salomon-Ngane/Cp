@@ -1,5 +1,5 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -10,12 +10,13 @@ from telegram.ext import (
 )
 
 import config
-from database.users import create_user_if_not_exists, get_user_by_id
-from database.sessions import get_top_leaderboard
+from database.users import create_user_if_not_exists
 from bot.ui import main_menu_keyboard
 from bot.handlers.creation import handle_creation_callback, handle_creation_text_input, propose_join_duel
-from bot.handlers.tickets_view import user_tickets, user_live, show_ticket_detail
+from bot.handlers.tickets_view import user_tickets, user_live
 from bot.handlers.referral import user_referral_menu, user_my_ids
+from bot.handlers.shop import shop_menu, handle_shop_buy
+from bot.handlers.top import top_command, handle_top_callbacks, show_category_menu
 from bot.handlers.admin import (
     admin_give,
     admin_take,
@@ -33,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gère la commande /start avec support des liens profonds (Parrainage & Invitation Salon)."""
+    """Gère la commande /start (Inscription, Parrainage, Liens d'invitation)."""
     telegram_id = update.effective_user.id
     username = update.effective_user.username or update.effective_user.first_name
     
@@ -51,7 +52,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif param.startswith("join_"):
             join_session_id = param.split("_", 1)[1]
 
-    # Création du compte si nouveau + notification ADMIN UNIQUE
     user, is_new = create_user_if_not_exists(telegram_id, username, referrer_id)
     
     if is_new:
@@ -62,55 +62,47 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         except Exception as e:
-            logger.error(f"Erreur lors de la notification admin pour le nouvel inscrit : {e}")
+            logger.error(f"Erreur de notification admin : {e}")
 
-    # Si l'utilisateur rejoint via un lien d'invitation de salon
     if join_session_id:
         await propose_join_duel(update.message, telegram_id, join_session_id, context)
         return
 
     welcome_text = (
         f"🏆 **Bienvenue sur Clashsport, {username} !**\n\n"
-        f"Défiez d'autres parieurs en Duels 1v1 ou en Arenas multi-joueurs, "
-        f"grimpez le classement et débloquez jusqu'à 5 niveaux de commissions de parrainage !\n\n"
+        f"Défiez d'autres parieurs, grimpez les classements et débloquez la boutique !\n\n"
         f"💰 Solde actuel : `{user['coins_balance']}` Coins\n"
-        f"🔑 Votre Code Joueur : `{user['user_code']}`"
+        f"🔑 Votre Code : `{user['user_code']}`"
     )
     
     await update.message.reply_text(welcome_text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
-
-async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande /top : Affiche le classement des 10 meilleurs pronostiqueurs."""
-    top_players = get_top_leaderboard(limit=10)
-    
-    if not top_players:
-        await update.message.reply_text("📭 Aucun joueur classé pour le moment.", parse_mode="Markdown")
-        return
-
-    text = "🏆 **CLASSEMENT GÉNÉRAL (TOP 10)**\n\n"
-    text += "Le classement est calculé sur le taux de réussite (%) des pronostics :\n\n"
-
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    
-    for idx, p in enumerate(top_players):
-        medal = medals[idx] if idx < len(medals) else f"#{idx+1}"
-        text += f"{medal} **{p['username']}** (`{p['user_code']}`)\n"
-        text += f"   👉 Taux de réussite : `{p['success_rate']}%` ({p['wins']}/{p['total']} victoires)\n\n"
-
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]])
-    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Routage principal des callbacks d'inline keyboards."""
     query = update.callback_query
     data = query.data
 
+    # Menus Principaux
     if data == "menu_network":
         await user_referral_menu(update, context)
-        await query.answer()
     elif data == "menu_top":
-        await top_command(update, context)
-        await query.answer()
+        await show_category_menu(update)
+    elif data == "menu_shop":
+        await shop_menu(update, context)
+    elif data == "menu_main":
+        user = create_user_if_not_exists(update.effective_user.id, update.effective_user.username)[0]
+        text = f"🏠 **Menu Principal**\n💰 Solde : `{user['coins_balance']}` Coins"
+        await query.edit_message_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+        
+    # Actions Boutique
+    elif data.startswith("buy_item_"):
+        await handle_shop_buy(update, context)
+        
+    # Actions Top (Classements dynamiques)
+    elif data.startswith("topcat_") or data.startswith("topshow_") or data == "top_back":
+        await handle_top_callbacks(update, context)
+        
+    # Actions Création de Duels/Arenas
     else:
         await handle_creation_callback(update, context)
 
@@ -134,7 +126,7 @@ def main():
     app.add_handler(CommandHandler("resolve_session", admin_resolve_session))
     app.add_handler(CommandHandler("alert", admin_alert))
 
-    # --- GESTION DES CALLBACKS ET TEXTES ---
+    # --- ROUTEUR DE CALLBACKS ET SAISIE TEXTE ---
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_creation_text_input))
 
