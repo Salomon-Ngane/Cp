@@ -8,35 +8,13 @@ from services.user_service import get_user_by_id, update_user_balance
 logger = logging.getLogger(__name__)
 
 def generate_short_code(length=7) -> str:
-    """Génère un identifiant court unique."""
     chars = string.ascii_uppercase + string.digits
     return ''.join(random.choices(chars, k=length))
-
-def get_estimated_end_time(matches: list) -> datetime:
-    """Calcule l'heure de fin estimée du salon."""
-    max_end = datetime.now(timezone.utc)
-    has_future = False
-    
-    for m in matches:
-        start_str = m.get("commence_time")
-        if not start_str: continue
-        try:
-            start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-            sport = str(m.get("sport", "")).lower()
-            duration = 150 if "basketball" in sport else 180 if "tennis" in sport else 120
-            end_time = start_time + timedelta(minutes=duration)
-            if not has_future or end_time > max_end:
-                max_end = end_time
-                has_future = True
-        except Exception:
-            pass
-            
-    return max_end
 
 def get_session(session_id: str):
     res = supabase.table("sessions").select("*").eq("id", session_id).execute().data
     if res: return res[0]
-    res_code = supabase.table("sessions").select("*").eq("session_code", session_id.upper()).execute().data
+    res_code = supabase.table("sessions").select("*").eq("session_code", str(session_id).upper()).execute().data
     return res_code[0] if res_code else None
 
 def create_session(creator_id: int, session_type: str, gross_fee: int, match_count: int, max_participants: int = 2, prize_mode: str = "WINNER_TAKES_ALL", predictions: list = None):
@@ -60,7 +38,6 @@ def create_session(creator_id: int, session_type: str, gross_fee: int, match_cou
     if not session_res: return None, "Erreur création."
 
     session = session_res[0]
-    
     ticket_data = {
         "session_id": session["id"],
         "user_id": creator_id,
@@ -122,16 +99,70 @@ def cancel_expired_sessions():
             update_user_balance(t["user_id"], s["gross_entry_fee"])
         supabase.table("sessions").update({"status": "CANCELLED"}).eq("id", s["id"]).execute()
 
-# --- CLASSEMENTS DYNAMIQUES ET RÉCOMPENSES ---
+# --- RÉSOLUTIONS AUTOMATIQUES DES MATCHS ET BONS ---
+
+def set_match_result(match_id: str, winning_outcome: str):
+    """Enregistre le résultat final d'un match et déclenche la mise à jour des pronostics."""
+    supabase.table("matches").update({"winner": winning_outcome, "status": "FINISHED"}).eq("id", match_id).execute()
+    evaluate_pending_tickets()
+
+def evaluate_pending_tickets():
+    """Vérifie tous les tickets en cours et les clôture automatiquement si tous leurs matchs sont finis."""
+    sessions_in_progress = supabase.table("sessions").select("*").eq("status", "IN_PROGRESS").execute().data or []
+    
+    for s in sessions_in_progress:
+        tickets = get_tickets_for_session(s["id"])
+        all_resolved = True
+        scores = {}
+
+        for t in tickets:
+            preds = t.get("predictions", [])
+            correct_count = 0
+            ticket_finished = True
+
+            for p in preds:
+                m_id = p.get("match_id")
+                match = supabase.table("matches").select("*").eq("id", m_id).execute().data
+                if not match or match[0].get("status") != "FINISHED":
+                    ticket_finished = False
+                    break
+                if match[0].get("winner") == p.get("choice"):
+                    correct_count += 1
+
+            if not ticket_finished:
+                all_resolved = False
+                break
+            
+            scores[t["id"]] = {"user_id": t["user_id"], "correct": correct_count}
+
+        if all_resolved and len(scores) == len(tickets):
+            # Tous les pronostics du salon sont vérifiés
+            sorted_tickets = sorted(scores.values(), key=lambda x: x["correct"], reverse=True)
+            pot = s["gross_entry_fee"] * len(tickets)
+            net_pot = int(pot * 0.92)
+
+            if len(sorted_tickets) >= 2 and sorted_tickets[0]["correct"] == sorted_tickets[1]["correct"]:
+                # Égalité : Remboursement des participants
+                for t in tickets:
+                    update_user_balance(t["user_id"], s["gross_entry_fee"])
+                    supabase.table("tickets").update({"status": "CANCELLED"}).eq("id", t["id"]).execute()
+                supabase.table("sessions").update({"status": "CANCELLED"}).eq("id", s["id"]).execute()
+            else:
+                # Vainqueur unique
+                winner_id = sorted_tickets[0]["user_id"]
+                update_user_balance(winner_id, net_pot)
+                for t in tickets:
+                    st = "WON" if t["user_id"] == winner_id else "LOST"
+                    supabase.table("tickets").update({"status": st}).eq("id", t["id"]).execute()
+                supabase.table("sessions").update({"status": "COMPLETED"}).eq("id", s["id"]).execute()
+
+# --- CLASSEMENT DYNAMIQUE ET DISSÉMINATION DES RÉCOMPENSES TOP ---
 
 def get_timeframe_details(period: str):
     now = datetime.now(timezone.utc)
-    if period == "day":
-        return now - timedelta(days=1), 500
-    elif period == "week":
-        return now - timedelta(days=7), 2000
-    elif period == "month":
-        return now - timedelta(days=30), 5000
+    if period == "day": return now - timedelta(days=1), 500
+    elif period == "week": return now - timedelta(days=7), 2000
+    elif period == "month": return now - timedelta(days=30), 5000
     return now - timedelta(days=1), 500
 
 def calculate_leaderboards(category: str, period: str):
