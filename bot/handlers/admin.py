@@ -3,13 +3,17 @@ from telegram import Update
 from telegram.ext import ContextTypes
 import config
 from database.connection import supabase
-from database.users import get_user_by_id, get_user_by_code, update_user_balance
-from database.sessions import (
+from services.user_service import get_user_by_id, get_user_by_code, update_user_balance
+from services.session_service import (
     get_session, 
     cancel_expired_sessions, 
     distribute_top_rewards,
     get_tickets_for_session
 )
+
+logger = logging.getLogger(__name__)
+# (Le reste du code de admin.py ne change pas)
+
 
 logger = logging.getLogger(__name__)
 
