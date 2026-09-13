@@ -1,137 +1,92 @@
 import logging
+import os
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request, Response, HTTPException
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ContextTypes
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
 import config
-from database.users import create_user_if_not_exists
-from bot.ui import main_menu_keyboard
-from bot.handlers.creation import handle_creation_callback, handle_creation_text_input, propose_join_duel
-from bot.handlers.tickets_view import user_tickets, user_live
-from bot.handlers.referral import user_referral_menu, user_my_ids
-from bot.handlers.shop import shop_menu, handle_shop_buy
-from bot.handlers.top import top_command, handle_top_callbacks, show_category_menu
+from bot.handlers.start_menu import start, user_top, handle_account_menu
 from bot.handlers.admin import (
-    admin_give,
-    admin_take,
-    admin_reward,
-    admin_sweep,
-    admin_stats,
-    admin_resolve_session,
-    admin_alert
+    admin_give, admin_take, admin_stats, admin_sync, 
+    admin_sweep, admin_alert, admin_resolve, admin_resolve_session
 )
+from bot.handlers.tickets_view import user_tickets, user_live
+from bot.handlers.creation import handle_creation_callback, handle_creation_text_input
+from database.sessions import cancel_expired_sessions
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gère la commande /start (Inscription, Parrainage, Liens d'invitation)."""
-    telegram_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name
-    
-    args = context.args
-    referrer_id = None
-    join_session_id = None
+# 1. Initialisation de l'application Telegram
+telegram_app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-    if args:
-        param = args[0]
-        if param.startswith("ref_"):
-            try:
-                referrer_id = int(param.split("_")[1])
-            except ValueError:
-                pass
-        elif param.startswith("join_"):
-            join_session_id = param.split("_", 1)[1]
+# Enregistrement des commandes
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("top", user_top))
+telegram_app.add_handler(CommandHandler("tickets", user_tickets))
+telegram_app.add_handler(CommandHandler("live", user_live))
 
-    user, is_new = create_user_if_not_exists(telegram_id, username, referrer_id)
-    
-    if is_new:
-        try:
-            await context.bot.send_message(
-                chat_id=config.ADMIN_TELEGRAM_ID,
-                text=f"🆕 **NOUVEAU JOUEUR INSCRIT !**\n\n👤 Nom : {username}\n🆔 ID : `{telegram_id}`\n🎫 Code : `{user['user_code']}`",
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.error(f"Erreur de notification admin : {e}")
+telegram_app.add_handler(CommandHandler("give", admin_give))
+telegram_app.add_handler(CommandHandler("take", admin_take))
+telegram_app.add_handler(CommandHandler("stats", admin_stats))
+telegram_app.add_handler(CommandHandler("sync", admin_sync))
+telegram_app.add_handler(CommandHandler("sweep", admin_sweep))
+telegram_app.add_handler(CommandHandler("alert", admin_alert))
+telegram_app.add_handler(CommandHandler("resolve", admin_resolve))
+telegram_app.add_handler(CommandHandler("resolve_session", admin_resolve_session))
 
-    if join_session_id:
-        await propose_join_duel(update.message, telegram_id, join_session_id, context)
-        return
+# Écoute des saisies manuelles (Mise, Nombre de joueurs Arena)
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_creation_text_input))
 
-    welcome_text = (
-        f"🏆 **Bienvenue sur Clashsport, {username} !**\n\n"
-        f"Défiez d'autres parieurs, grimpez les classements et débloquez la boutique !\n\n"
-        f"💰 Solde actuel : `{user['coins_balance']}` Coins\n"
-        f"🔑 Votre Code : `{user['user_code']}`"
-    )
-    
-    await update.message.reply_text(welcome_text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
-
-async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Routage principal des callbacks d'inline keyboards."""
+async def global_callback_router(update: Update, context):
     query = update.callback_query
-    data = query.data
-
-    # Menus Principaux
-    if data == "menu_network":
-        await user_referral_menu(update, context)
-    elif data == "menu_top":
-        await show_category_menu(update)
-    elif data == "menu_shop":
-        await shop_menu(update, context)
-    elif data == "menu_main":
-        user = create_user_if_not_exists(update.effective_user.id, update.effective_user.username)[0]
-        text = f"🏠 **Menu Principal**\n💰 Solde : `{user['coins_balance']}` Coins"
-        await query.edit_message_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
-        
-    # Actions Boutique
-    elif data.startswith("buy_item_"):
-        await handle_shop_buy(update, context)
-        
-    # Actions Top (Classements dynamiques)
-    elif data.startswith("topcat_") or data.startswith("topshow_") or data == "top_back":
-        await handle_top_callbacks(update, context)
-        
-    # Actions Création de Duels/Arenas
+    if query.data == "menu_account":
+        await handle_account_menu(query, query.from_user.id)
     else:
         await handle_creation_callback(update, context)
 
-def main():
-    app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
+telegram_app.add_handler(CallbackQueryHandler(global_callback_router))
 
-    # --- COMMANDES JOUEURS ---
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("top", top_command))
-    app.add_handler(CommandHandler("tickets", user_tickets))
-    app.add_handler(CommandHandler("live", user_live))
-    app.add_handler(CommandHandler("network", user_referral_menu))
-    app.add_handler(CommandHandler("myids", user_my_ids))
+# 2. Lifecycle FastAPI pour gérer l'initialisation du bot
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    await telegram_app.initialize()
+    await telegram_app.start()
+    
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    if render_url:
+        webhook_url = f"{render_url}/webhook"
+        await telegram_app.bot.set_webhook(url=webhook_url)
+        logger.info(f"✅ Webhook configuré sur : {webhook_url}")
+    else:
+        logger.warning("⚠️ RENDER_EXTERNAL_URL non défini.")
+    
+    yield
+    
+    await telegram_app.stop()
+    await telegram_app.shutdown()
 
-    # --- COMMANDES ADMINISTRATEUR ---
-    app.add_handler(CommandHandler("give", admin_give))
-    app.add_handler(CommandHandler("take", admin_take))
-    app.add_handler(CommandHandler("reward", admin_reward))
-    app.add_handler(CommandHandler("sweep", admin_sweep))
-    app.add_handler(CommandHandler("stats", admin_stats))
-    app.add_handler(CommandHandler("resolve_session", admin_resolve_session))
-    app.add_handler(CommandHandler("alert", admin_alert))
+# 3. DÉCLARATION GLOBALE : C'est cette variable 'app' que Uvicorn recherche
+app = FastAPI(lifespan=lifespan)
 
-    # --- ROUTEUR DE CALLBACKS ET SAISIE TEXTE ---
-    app.add_handler(CallbackQueryHandler(callback_router))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_creation_text_input))
+@app.get("/")
+async def health_check():
+    """Valide le scan de port exigé par Render."""
+    return {"status": "Clashsport Webhook Server OK"}
 
-    logger.info("🤖 Bot Clashsport démarré avec succès !")
-    app.run_polling()
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """Reçoit les mises à jour Telegram."""
+    data = await request.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return Response(status_code=200)
 
-if __name__ == "__main__":
-    main()
+@app.get("/cron/sweep")
+async def cron_sweep(token: str = None):
+    """Endpoint de nettoyage automatique."""
+    if token != "clashsport_cron_secret_2026":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    cancel_expired_sessions()
+    return {"status": "success", "message": "Sessions expirées nettoyées."}
