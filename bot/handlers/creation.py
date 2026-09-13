@@ -1,5 +1,6 @@
 import math
 import logging
+from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 import config
@@ -78,7 +79,6 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         await _show_sports_selection(update)
 
     elif data == "start_join_draft":
-        # Route déclenchée après l'acceptation de l'écran d'information du salon
         await _show_sports_selection(update)
 
     elif data.startswith("bet_"):
@@ -110,8 +110,20 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
     elif data == "confirm_ticket":
         await _process_ticket_creation(query, user_id, context)
 
+    # --- NOUVEAU SOUS-MENU POUR LA LISTE PUBLIQUE ---
     elif data == "list_public":
-        await _show_public_duels(query, user_id)
+        text = "🔍 **Rejoindre un salon public**\n\nQuel mode de jeu cherchez-vous ?"
+        keyboard = [
+            [InlineKeyboardButton("🥊 Voir les Duels 1v1", callback_data="list_pubtype_DUEL")],
+            [InlineKeyboardButton("🏟️ Voir les Arenas", callback_data="list_pubtype_ARENA")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif data.startswith("list_pubtype_"):
+        stype = data.split("_")[2]
+        await _show_public_duels(query, user_id, stype)
+    # --------------------------------------------------
 
     elif data.startswith("join_pub_"):
         sid = data.split("_")[2]
@@ -398,7 +410,8 @@ async def _process_ticket_creation(query, user_id, context):
         f"Type : `{session['type']}`\n"
         f"Mise : `{session['gross_entry_fee']}` Coins\n"
         f"Matchs : `{session['match_count']}`\n\n"
-        f"🔗 **Lien d'invitation à partager :**\n`{invite_link}`"
+        f"🔗 **Lien d'invitation à partager :**\n`{invite_link}`\n\n"
+        f"⏳ *Note : Votre salon restera privé pendant 5 minutes. Passé ce délai, il apparaîtra dans la liste publique pour que d'autres joueurs puissent vous affronter.*"
     )
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Voir mon ticket", callback_data=f"ticket_{sid}_mine")],
@@ -406,40 +419,59 @@ async def _process_ticket_creation(query, user_id, context):
     ])
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
-
-async def _show_public_duels(query, user_id):
-    res = supabase.table("sessions").select("*").eq("status", "WAITING").neq("creator_id", user_id).execute().data
+# --- MODIFICATION DE LA LISTE PUBLIQUE (GRACE PERIOD) ---
+async def _show_public_duels(query, user_id, stype):
+    """Affiche uniquement la liste filtrée selon le type choisi et exclut ceux dans la période de grâce de 5 minutes."""
+    
+    # 1. On récupère les sessions
+    res = supabase.table("sessions").select("*").eq("status", "WAITING").eq("type", stype).neq("creator_id", user_id).execute().data
+    
     if not res:
-        await query.answer("Aucun salon public disponible pour le moment.", show_alert=True)
+        await query.answer(f"Aucun salon {stype} public disponible pour le moment.", show_alert=True)
         return
 
-    # Séparation dynamique des salons par type
-    duels = [s for s in res if s.get("type") == "DUEL"]
-    arenas = [s for s in res if s.get("type") == "ARENA"]
+    # 2. Filtrage des 5 minutes de grâce
+    now = datetime.now(timezone.utc)
+    public_sessions = []
+    
+    for s in res:
+        created_at_str = s.get("created_at")
+        if created_at_str:
+            try:
+                created_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                # On ajoute 5 minutes à la date de création. Si on est après cette heure-là, le salon est public.
+                if now >= (created_dt + timedelta(minutes=5)):
+                    public_sessions.append(s)
+            except ValueError:
+                # Si erreur de format, on l'affiche par défaut
+                public_sessions.append(s)
+        else:
+            public_sessions.append(s)
 
-    text = "🔍 **Salons Publics Disponibles**\n\nChoisissez un salon à rejoindre :"
+    if not public_sessions:
+        await query.answer(f"Aucun salon {stype} public n'est disponible (certains sont en période d'attente privée).", show_alert=True)
+        return
+
+    lbl_type = "Duel 1v1" if stype == "DUEL" else "Arena"
+    text = f"🔍 **Salons Publics ({lbl_type})**\nChoisissez un salon à rejoindre :"
     keyboard = []
+    
+    for s in public_sessions:
+        creator = get_user_by_id(s["creator_id"]) or {}
+        uname = creator.get("username", "Joueur")
+        if stype == "DUEL":
+            btn_lbl = f"🥊 {uname} — {s['gross_entry_fee']} Coins ({s['match_count']}m)"
+        else:
+            btn_lbl = f"🏟️ {uname} — {s['gross_entry_fee']} Coins ({s['match_count']}m) [Max {s.get('max_participants', 4)}j]"
+        
+        keyboard.append([InlineKeyboardButton(btn_lbl, callback_data=f"join_pub_{s['id']}")])
 
-    if duels:
-        keyboard.append([InlineKeyboardButton("🥊 --- DUELS 1v1 ---", callback_data="ignore")])
-        for s in duels:
-            creator = get_user_by_id(s["creator_id"]) or {}
-            uname = creator.get("username", "Joueur")
-            keyboard.append([InlineKeyboardButton(f"{uname} — {s['gross_entry_fee']} Coins ({s['match_count']}m)", callback_data=f"join_pub_{s['id']}")])
-
-    if arenas:
-        keyboard.append([InlineKeyboardButton("🏟️ --- ARENAS ---", callback_data="ignore")])
-        for s in arenas:
-            creator = get_user_by_id(s["creator_id"]) or {}
-            uname = creator.get("username", "Joueur")
-            keyboard.append([InlineKeyboardButton(f"{uname} — {s['gross_entry_fee']} Coins ({s['match_count']}m) [Max {s['max_participants']}j]", callback_data=f"join_pub_{s['id']}")])
-
-    keyboard.append([InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")])
+    keyboard.append([InlineKeyboardButton("⬅️ Retour aux modes", callback_data="list_public")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+# --------------------------------------------------------
 
 
 async def _prompt_join_session(query, user_id, session_id):
-    """Écran intermédiaire de notification avant de rejoindre un salon."""
     session = get_session(session_id)
     if not session or session["status"] != "WAITING":
         await query.answer("Ce salon n'est plus disponible.", show_alert=True)
@@ -472,7 +504,6 @@ async def _prompt_join_session(query, user_id, session_id):
 
 
 async def propose_join_duel(message, user_id, session_id, context):
-    """Gère l'arrivée via un lien externe (/start join_XXX)."""
     session = get_session(session_id)
     if not session or session["status"] != "WAITING":
         await message.reply_text("❌ Ce salon n'est plus disponible ou a déjà débuté.")
