@@ -1,9 +1,11 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from database.sessions import calculate_leaderboards
+from services.session_service import calculate_leaderboards
 
 logger = logging.getLogger(__name__)
+# (Le reste du code de top.py ne change pas)
+
 
 # Dictionnaires pour un affichage propre
 CAT_NAMES = {
