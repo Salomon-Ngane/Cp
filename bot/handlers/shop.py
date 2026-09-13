@@ -1,9 +1,11 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from database.users import get_user_by_id, get_user_grade, buy_item_from_shop
+from services.user_service import get_user_by_id, get_user_grade, buy_item_from_shop
 
 logger = logging.getLogger(__name__)
+# (Le reste du code de shop.py ne change pas)
+
 
 async def shop_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text: str = None):
     """Affiche la boutique et l'inventaire du joueur."""
