@@ -311,8 +311,65 @@ def get_weekly_leaderboard(limit: int = 10) -> list:
     return leaderboard
 
 def get_dynamic_leaderboard(category: str, period: str, limit: int = 10):
-    """Fonction en attente pour le classement réseau/volume/winrate"""
-    return []
+    """
+    Calcule le classement dynamique selon la catégorie (winrate, network, volume) 
+    et la période (24h, 7d, 30d) avec application des seuils de volume minimaux.
+    """
+    now = datetime.now(timezone.utc)
+    if period == "24h":
+        start_date = (now - timedelta(days=1)).isoformat()
+        min_volume = 500
+    elif period == "7d":
+        start_date = (now - timedelta(days=7)).isoformat()
+        min_volume = 2000
+    elif period == "30d":
+        start_date = (now - timedelta(days=30)).isoformat()
+        min_volume = 5000
+    else:
+        start_date = (now - timedelta(days=7)).isoformat()
+        min_volume = 2000
+
+    # Récupération des sessions complétées sur la période
+    sessions = supabase.table("sessions").select("*").eq("status", "COMPLETED").gte("created_at", start_date).execute().data
+    
+    user_stats = {}
+    
+    for s in sessions:
+        s_tickets = get_tickets_for_session(s["id"])
+        gross_fee = s["gross_entry_fee"]
+        winner_id = s.get("winner_id")
+        
+        for t in s_tickets:
+            uid = t["user_id"]
+            if uid not in user_stats:
+                u_obj = get_user_by_id(uid)
+                uname = u_obj.get("username", f"Joueur {uid}") if u_obj else f"Joueur {uid}"
+                user_stats[uid] = {"telegram_id": uid, "username": uname, "wins": 0, "games": 0, "volume": 0}
+            
+            user_stats[uid]["games"] += 1
+            user_stats[uid]["volume"] += gross_fee
+            if winner_id == uid:
+                user_stats[uid]["wins"] += 1
+
+    eligible_users = []
+    for uid, stats in user_stats.items():
+        # Vérification du seuil minimal de volume exigé par période
+        if stats["volume"] >= min_volume:
+            if category == "winrate":
+                score = (stats["wins"] / stats["games"]) * 100 if stats["games"] > 0 else 0
+            elif category == "volume":
+                score = stats["volume"]
+            elif category == "network":
+                u_obj = get_user_by_id(uid)
+                score = u_obj.get("active_referrals_count", 0) if u_obj else 0
+            else:
+                score = stats["volume"]
+            
+            eligible_users.append({"telegram_id": uid, "username": stats["username"], "score": score})
+
+    ranked = sorted(eligible_users, key=lambda x: x["score"], reverse=True)[:limit]
+    return ranked
+
 
 def update_api_quota(quota_str: str):
     if quota_str:
