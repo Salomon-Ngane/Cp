@@ -3,7 +3,7 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from database.sessions import (
+from services.session_service import (
     get_user_sessions, 
     get_session, 
     get_tickets_for_session, 
