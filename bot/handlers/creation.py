@@ -30,12 +30,11 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if data == "menu_main":
-        # Sécurité : annuler toute attente de saisie
-        update_draft_settings(user_id, {"awaiting_fee": False, "awaiting_arena_max": False})
+        context.user_data.pop("creation_state", None) # Nettoyage de l'état en RAM
         await query.edit_message_text("🏠 **Menu Principal**", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
     elif data == "menu_duel":
-        update_draft_settings(user_id, {"awaiting_fee": False, "awaiting_arena_max": False})
+        context.user_data.pop("creation_state", None)
         text = "⚔️ **Mode de jeu**\n\nChoisissez comment vous souhaitez parier :"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🥊 Duel 1v1", callback_data="type_DUEL"), InlineKeyboardButton("🏟️ Mode Arena", callback_data="type_ARENA")],
@@ -49,10 +48,9 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         update_draft_settings(user_id, {"session_type": stype})
         if stype == "DUEL":
             update_draft_settings(user_id, {"max_participants": 2, "prize_mode": "WINNER_TAKES_ALL"})
-            await _ask_entry_fee(update, user_id)
+            await _ask_entry_fee(update, user_id, context)
         else:
-            # Saisie manuelle du nombre de joueurs Arena
-            update_draft_settings(user_id, {"awaiting_arena_max": True})
+            context.user_data["creation_state"] = "awaiting_arena_max" # État stocké en RAM
             text = "🏟️ **Configuration Arena**\n\nEntrez dans le chat le **nombre maximum de joueurs** pour ce salon (entre 3 et 15) :"
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]])
             await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
@@ -60,11 +58,12 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
     elif data.startswith("arena_prize_"):
         mode = "TOP_3" if data.split("_")[2] == "TOP3" else "WINNER_TAKES_ALL"
         update_draft_settings(user_id, {"prize_mode": mode})
-        await _ask_entry_fee(update, user_id)
+        await _ask_entry_fee(update, user_id, context)
 
     elif data.startswith("fee_"):
         fee = int(data.split("_")[1])
-        update_draft_settings(user_id, {"gross_fee": fee, "awaiting_fee": False})
+        update_draft_settings(user_id, {"gross_fee": fee})
+        context.user_data.pop("creation_state", None)
         await _show_sports_selection(update)
 
     elif data.startswith("sport_"):
@@ -102,6 +101,9 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
             await _show_competitions_for_sport(query, draft.get("current_sport", "soccer"))
 
     elif data == "validate_ticket":
+        await _show_ticket_summary(query, user_id)
+
+    elif data == "confirm_ticket":
         await _process_ticket_creation(query, user_id, context)
 
     elif data == "list_public":
@@ -137,17 +139,15 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
 
 
 async def handle_creation_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Intercepte les textes libres pour le nombre de joueurs (Arena) et la Mise (Coins)."""
     user_id = update.effective_user.id
-    draft = get_draft_settings(user_id)
+    state = context.user_data.get("creation_state")
     
-    if not draft:
+    if not state:
         return
 
     text_input = update.message.text.strip()
     
-    # 1. Saisie manuelle : Nombre de joueurs Arena
-    if draft.get("awaiting_arena_max"):
+    if state == "awaiting_arena_max":
         if not text_input.isdigit():
             await update.message.reply_text("❌ Veuillez entrer un nombre valide.")
             return
@@ -156,7 +156,8 @@ async def handle_creation_text_input(update: Update, context: ContextTypes.DEFAU
             await update.message.reply_text("❌ Le nombre de joueurs en Arena doit être compris entre 3 et 15.")
             return
         
-        update_draft_settings(user_id, {"max_participants": mx, "awaiting_arena_max": False})
+        update_draft_settings(user_id, {"max_participants": mx})
+        context.user_data.pop("creation_state", None)
         
         text = "🏆 **Mode de Distribution des Prix (Arena)**"
         keyboard = InlineKeyboardMarkup([
@@ -167,22 +168,23 @@ async def handle_creation_text_input(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
         return
 
-    # 2. Saisie manuelle : Montant de la mise (Coins)
-    if draft.get("awaiting_fee"):
+    if state == "awaiting_fee":
         if not text_input.isdigit() or int(text_input) <= 0:
             await update.message.reply_text("❌ Veuillez entrer un montant valide supérieur à 0.")
             return
         fee = int(text_input)
-        update_draft_settings(user_id, {"gross_fee": fee, "awaiting_fee": False})
+        update_draft_settings(user_id, {"gross_fee": fee})
+        context.user_data.pop("creation_state", None)
         await _show_sports_selection(update)
         return
 
 
-async def _ask_entry_fee(update: Update, user_id: int):
-    update_draft_settings(user_id, {"awaiting_fee": True})
+async def _ask_entry_fee(update: Update, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["creation_state"] = "awaiting_fee"
     text = "💰 **Mise d'entrée (Coins)**\n\nSélectionnez une mise rapide ci-dessous, **ou tapez manuellement le montant** de votre choix dans le chat :"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("100 Coins", callback_data="fee_100"), InlineKeyboardButton("500 Coins", callback_data="fee_500")],
+        [InlineKeyboardButton("1000 Coins", callback_data="fee_1000"), InlineKeyboardButton("5000 Coins", callback_data="fee_5000")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]
     ])
     if update.callback_query:
@@ -193,7 +195,6 @@ async def _ask_entry_fee(update: Update, user_id: int):
 
 async def _show_sports_selection(update: Update):
     text = "⚽ **Sélection des Matchs**\n\nChoisissez un sport pour composer votre ticket :"
-    # Sécurisation des callbacks en minuscules strictes pour assurer la correspondance en base de données
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚽ Football", callback_data="sport_soccer"), InlineKeyboardButton("🏀 Basketball", callback_data="sport_basketball")],
         [InlineKeyboardButton("🎾 Tennis", callback_data="sport_tennis")],
@@ -300,6 +301,43 @@ async def _show_matches_for_comp(query, comp_prefix):
     keyboard.append([InlineKeyboardButton("⬅️ Retour aux compétitions", callback_data=f"sport_{sport}")])
 
     await query.edit_message_text(header_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def _show_ticket_summary(query, user_id):
+    """NOUVEL ÉCRAN : Résumé du ticket avant confirmation."""
+    draft = get_draft_settings(user_id)
+    cart = get_cart(user_id)
+    
+    if not cart:
+        await query.answer("Votre panier est vide !", show_alert=True)
+        return
+
+    match_ids = [c["match_id"] for c in cart]
+    matches = get_matches_by_ids(match_ids)
+    match_dict = {str(m["api_match_id"]): m for m in matches}
+
+    text = "📋 **RÉSUMÉ DE VOTRE TICKET**\n\n"
+    text += f"🏷️ **Type :** `{draft.get('session_type', 'DUEL')}`\n"
+    text += f"💰 **Mise :** `{draft.get('gross_fee', 100)} Coins`\n"
+    text += f"🎯 **Sélection ({len(cart)} matchs) :**\n\n"
+
+    for item in cart:
+        m = match_dict.get(str(item["match_id"]), {})
+        home = m.get("home_team", "Équipe A")
+        away = m.get("away_team", "Équipe B")
+        pick_str = "1" if item["pick"] == "HOME" else "N" if item["pick"] == "DRAW" else "2"
+        
+        text += f"🔹 {home} vs {away}\n"
+        text += f"👉 **Pronostic : {pick_str}** (Cote: {item['odds']})\n\n"
+
+    text += "Êtes-vous sûr de vouloir valider ce ticket ?"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Confirmer la création", callback_data="confirm_ticket")],
+        [InlineKeyboardButton("⬅️ Modifier mes choix", callback_data="back_to_sports")]
+    ])
+    
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def _process_ticket_creation(query, user_id, context):
