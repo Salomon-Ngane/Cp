@@ -5,7 +5,7 @@ from telegram.ext import ContextTypes
 import config
 from database.connection import supabase
 from database.cart import get_draft_settings, update_draft_settings, clear_draft, toggle_cart_item, get_cart
-from database.sessions import get_matches_by_sport, get_matches_by_ids, create_session, join_session, get_session
+from database.sessions import get_matches_by_sport, get_matches_by_ids, create_session, join_session, get_session, get_tickets_for_session
 from database.users import get_user_by_id
 from bot.ui import main_menu_keyboard
 from bot.handlers.tickets_view import show_ticket_detail
@@ -30,7 +30,7 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if data == "menu_main":
-        context.user_data.pop("creation_state", None) # Nettoyage de l'état en RAM
+        context.user_data.pop("creation_state", None)
         await query.edit_message_text("🏠 **Menu Principal**", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
     elif data == "menu_duel":
@@ -50,7 +50,7 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
             update_draft_settings(user_id, {"max_participants": 2, "prize_mode": "WINNER_TAKES_ALL"})
             await _ask_entry_fee(update, user_id, context)
         else:
-            context.user_data["creation_state"] = "awaiting_arena_max" # État stocké en RAM
+            context.user_data["creation_state"] = "awaiting_arena_max"
             text = "🏟️ **Configuration Arena**\n\nEntrez dans le chat le **nombre maximum de joueurs** pour ce salon (entre 3 et 15) :"
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")]])
             await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
@@ -75,6 +75,10 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         await _show_matches_for_comp(query, comp_prefix)
 
     elif data == "back_to_sports":
+        await _show_sports_selection(update)
+
+    elif data == "start_join_draft":
+        # Route déclenchée après l'acceptation de l'écran d'information du salon
         await _show_sports_selection(update)
 
     elif data.startswith("bet_"):
@@ -304,7 +308,6 @@ async def _show_matches_for_comp(query, comp_prefix):
 
 
 async def _show_ticket_summary(query, user_id):
-    """NOUVEL ÉCRAN : Résumé du ticket avant confirmation."""
     draft = get_draft_settings(user_id)
     cart = get_cart(user_id)
     
@@ -410,37 +413,93 @@ async def _show_public_duels(query, user_id):
         await query.answer("Aucun salon public disponible pour le moment.", show_alert=True)
         return
 
-    text = "🔍 **Salons Publics Disponibles**\nChoisissez un salon à rejoindre :"
+    # Séparation dynamique des salons par type
+    duels = [s for s in res if s.get("type") == "DUEL"]
+    arenas = [s for s in res if s.get("type") == "ARENA"]
+
+    text = "🔍 **Salons Publics Disponibles**\n\nChoisissez un salon à rejoindre :"
     keyboard = []
-    for s in res:
-        creator = get_user_by_id(s["creator_id"]) or {}
-        uname = creator.get("username", "Joueur")
-        keyboard.append([InlineKeyboardButton(f"⚔️ {uname} — {s['gross_entry_fee']} Coins ({s['match_count']}m)", callback_data=f"join_pub_{s['id']}")])
+
+    if duels:
+        keyboard.append([InlineKeyboardButton("🥊 --- DUELS 1v1 ---", callback_data="ignore")])
+        for s in duels:
+            creator = get_user_by_id(s["creator_id"]) or {}
+            uname = creator.get("username", "Joueur")
+            keyboard.append([InlineKeyboardButton(f"{uname} — {s['gross_entry_fee']} Coins ({s['match_count']}m)", callback_data=f"join_pub_{s['id']}")])
+
+    if arenas:
+        keyboard.append([InlineKeyboardButton("🏟️ --- ARENAS ---", callback_data="ignore")])
+        for s in arenas:
+            creator = get_user_by_id(s["creator_id"]) or {}
+            uname = creator.get("username", "Joueur")
+            keyboard.append([InlineKeyboardButton(f"{uname} — {s['gross_entry_fee']} Coins ({s['match_count']}m) [Max {s['max_participants']}j]", callback_data=f"join_pub_{s['id']}")])
+
     keyboard.append([InlineKeyboardButton("⬅️ Retour", callback_data="menu_duel")])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
 async def _prompt_join_session(query, user_id, session_id):
+    """Écran intermédiaire de notification avant de rejoindre un salon."""
     session = get_session(session_id)
-    if not session:
-        await query.answer("Ce salon n'existe plus.", show_alert=True)
+    if not session or session["status"] != "WAITING":
+        await query.answer("Ce salon n'est plus disponible.", show_alert=True)
+        return
+
+    tickets = get_tickets_for_session(session_id)
+    current_players = len(tickets)
+    max_players = session.get("max_participants", 2)
+
+    if current_players >= max_players:
+        await query.answer("Ce salon est déjà plein.", show_alert=True)
         return
     
     update_draft_settings(user_id, {"joining_session_id": session_id, "match_count": session["match_count"]})
-    await _show_sports_selection(query)
+    
+    stype = "🥊 Duel 1v1" if session["type"] == "DUEL" else "🏟️ Arena"
+    text = (
+        f"ℹ️ **Informations du Salon**\n\n"
+        f"**Type :** {stype}\n"
+        f"**Mise :** `{session['gross_entry_fee']}` Coins\n"
+        f"**Matchs à pronostiquer :** `{session['match_count']}`\n"
+        f"**Joueurs actuels :** `{current_players}/{max_players}`\n\n"
+        "Prêt à relever le défi ?"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Composer mon ticket", callback_data="start_join_draft")],
+        [InlineKeyboardButton("⬅️ Retour aux salons", callback_data="list_public")]
+    ])
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def propose_join_duel(message, user_id, session_id, context):
+    """Gère l'arrivée via un lien externe (/start join_XXX)."""
     session = get_session(session_id)
     if not session or session["status"] != "WAITING":
         await message.reply_text("❌ Ce salon n'est plus disponible ou a déjà débuté.")
         return
+
+    tickets = get_tickets_for_session(session_id)
+    current_players = len(tickets)
+    max_players = session.get("max_participants", 2)
+
+    if current_players >= max_players:
+        await message.reply_text("❌ Ce salon est déjà plein.")
+        return
     
     update_draft_settings(user_id, {"joining_session_id": session_id, "match_count": session["match_count"]})
-    text = f"⚔️ Vous rejoignez un salon de `{session['gross_entry_fee']}` Coins !\nVeuillez sélectionner vos `{session['match_count']}` pronostics :"
+    
+    stype = "🥊 Duel 1v1" if session["type"] == "DUEL" else "🏟️ Arena"
+    text = (
+        f"ℹ️ **Vous avez été invité à rejoindre un salon !**\n\n"
+        f"**Type :** {stype}\n"
+        f"**Mise :** `{session['gross_entry_fee']}` Coins\n"
+        f"**Matchs à pronostiquer :** `{session['match_count']}`\n"
+        f"**Joueurs actuels :** `{current_players}/{max_players}`\n\n"
+        "Veuillez sélectionner un sport pour composer votre ticket :"
+    )
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚽ Choisir des matchs (Football)", callback_data="sport_soccer")],
+        [InlineKeyboardButton("⚽ Football", callback_data="sport_soccer")],
         [InlineKeyboardButton("🏀 Basketball", callback_data="sport_basketball")],
         [InlineKeyboardButton("🎾 Tennis", callback_data="sport_tennis")]
     ])
