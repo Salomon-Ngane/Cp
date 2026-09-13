@@ -9,8 +9,9 @@ import config
 from bot.handlers.start_menu import start, user_top, handle_account_menu
 from bot.handlers.admin import (
     admin_give, admin_take, admin_stats, admin_sync, 
-    admin_sweep, admin_alert, admin_resolve, admin_resolve_session
+    admin_sweep, admin_alert, admin_resolve, admin_resolve_session, admin_reward
 )
+
 from bot.handlers.tickets_view import user_tickets, user_live
 from bot.handlers.creation import handle_creation_callback, handle_creation_text_input
 from services.session_service import cancel_expired_sessions
