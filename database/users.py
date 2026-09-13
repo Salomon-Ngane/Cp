@@ -8,6 +8,10 @@ logger = logging.getLogger(__name__)
 # ID spécial du compte solidaire "Don ❤️"
 DONATION_ACCOUNT_ID = "DON_COMMUNITY_ACCOUNT"
 
+# Configuration de la Boutique
+SHOP_PRICES = {1: 500, 2: 1000}
+REQUIRED_GRADES = {1: 1, 2: 2}  # Grade 1 (Recrue) pour Item 1, Grade 2 (Pro) pour Item 2
+
 def generate_short_code(length=7) -> str:
     """Génère un identifiant alphanumérique unique à 7 caractères (ex: K7M9X2P)."""
     chars = string.ascii_uppercase + string.digits
@@ -24,7 +28,7 @@ def get_user_by_code(user_code: str):
     return res[0] if res else None
 
 def create_user_if_not_exists(telegram_id: int, username: str = None, referrer_id: int = None):
-    """Crée un nouvel utilisateur s'il n'existe pas, enregistre son parrain et génère son code court."""
+    """Crée un nouvel utilisateur, enregistre son parrain et initialise son inventaire."""
     existing = get_user_by_id(telegram_id)
     if existing:
         return existing, False
@@ -42,12 +46,12 @@ def create_user_if_not_exists(telegram_id: int, username: str = None, referrer_i
         "coins_balance": 1000,  # Solde initial de bienvenue
         "referrer_id": referrer_id,
         "active_referrals_count": 0,
-        "item_boost_count": 0 # Quantité d'Item 1 (Boost Cote +0.5)
+        "item_1_count": 0,
+        "item_2_count": 0,
+        "item_3_count": 0
     }
     
     res = supabase.table("users").insert(data).execute().data
-    
-    # Création automatique du compte Don ❤️ si inexistant
     _ensure_donation_account_exists()
     
     return res[0] if res else None, True
@@ -73,7 +77,7 @@ def update_user_balance(telegram_id: int, amount_change: int):
     return True
 
 def get_user_grade(active_referrals: int) -> dict:
-    """Calcule le grade de l'utilisateur et les niveaux de parrainage débloqués selon l'activité de son réseau."""
+    """Calcule le grade de l'utilisateur et les niveaux débloqués."""
     if active_referrals >= 75:
         return {"name": "Légende 👑", "level": 5, "unlocked_levels": 5}
     elif active_referrals >= 55:
@@ -85,11 +89,44 @@ def get_user_grade(active_referrals: int) -> dict:
     else:
         return {"name": "Recrue 🥉", "level": 1, "unlocked_levels": 1}
 
+def buy_item_from_shop(telegram_id: int, item_id: int) -> tuple[bool, str]:
+    """Gère l'achat d'un Item dans la boutique avec vérification des limites et grades."""
+    user = get_user_by_id(telegram_id)
+    if not user:
+        return False, "Utilisateur introuvable."
+
+    if item_id not in SHOP_PRICES:
+        return False, "Cet Item n'est pas disponible à la vente."
+
+    price = SHOP_PRICES[item_id]
+    if user.get("coins_balance", 0) < price:
+        return False, f"Fonds insuffisants. Il vous faut {price} Coins."
+
+    grade_info = get_user_grade(user.get("active_referrals_count", 0))
+    if grade_info["level"] < REQUIRED_GRADES[item_id]:
+        return False, f"Grade insuffisant. L'Item {item_id} requiert le grade de niveau {REQUIRED_GRADES[item_id]}."
+
+    item_key = f"item_{item_id}_count"
+    current_qty = user.get(item_key, 0)
+    
+    if current_qty >= 3:
+        return False, f"Votre sac est plein ! Vous possédez déjà 3x Item {item_id}."
+
+    # Débit et ajout à l'inventaire
+    new_balance = user["coins_balance"] - price
+    new_qty = current_qty + 1
+    
+    supabase.table("users").update({
+        "coins_balance": new_balance,
+        item_key: new_qty
+    }).eq("telegram_id", telegram_id).execute()
+    
+    return True, f"✅ Achat réussi ! Vous avez ajouté 1x Item {item_id} à votre sac."
+
 def get_referral_lineage(telegram_id: int, max_depth: int = 5) -> list:
     """Remonte la chaîne des 5 parrains d'un joueur."""
     lineage = []
     current_id = telegram_id
-    
     for _ in range(max_depth):
         user = get_user_by_id(current_id)
         if not user or not user.get("referrer_id"):
@@ -100,24 +137,12 @@ def get_referral_lineage(telegram_id: int, max_depth: int = 5) -> list:
             break
         lineage.append(referrer)
         current_id = ref_id
-        
     return lineage
 
 def process_rake_and_referrals(total_staked: float):
     """
-    Distribue les 4.0% de commission sur 5 niveaux et alimente le compte Don ❤️ (0.2%).
-    
-    Répartition :
-    - Don ❤️ : 0.2%
-    - Niveau 1 : 2.0% (Débloqué Grade 1+)
-    - Niveau 2 : 1.0% (Débloqué Grade 2+)
-    - Niveau 3 : 0.5% (Débloqué Grade 3+)
-    - Niveau 4 : 0.2% (Débloqué Grade 4+)
-    - Niveau 5 : 0.1% (Débloqué Grade 5)
+    Distribue 4.0% de commission sur 5 niveaux et alimente le compte Don ❤️ (0.2%).
     """
-    rates = [0.02, 0.01, 0.005, 0.002, 0.001]
-    
-    # 1. Versement automatique de 0.2% au compte Don ❤️
     don_amount = int(total_staked * 0.002)
     if don_amount > 0:
-        update_user_balance(0, don_amount) # ID 0 réservé au compte Don
+        update_user_balance(0, don_amount) # ID 0 = compte Don
