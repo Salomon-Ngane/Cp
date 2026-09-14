@@ -19,8 +19,7 @@ async def user_referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     active_refs = user.get("active_referrals_count", 0)
     grade_info = get_user_grade(active_refs)
     user_code = user.get("user_code", "N/A")
-        item_boosts = user.get("item_1_count", 0)
-
+item_boosts = user.get("item_1_count", 0)
 
     # Récupération du solde Don ❤️ Solidaire (ID 0)
     don_account = get_user_by_id(0)
