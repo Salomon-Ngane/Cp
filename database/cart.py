@@ -82,3 +82,6 @@ def replace_cart_from_predictions(user_id: int, predictions: list) -> dict:
     response = supabase.table("cart").insert(rows).execute()
     return {"restored": len(response.data or rows), "data": response.data or []}
 
+def replace_cart(user_id: int, predictions: list) -> dict:
+    """Compatibilité avec l'ancien appel de replay : remplace le panier."""
+    return replace_cart_from_predictions(user_id, predictions)
