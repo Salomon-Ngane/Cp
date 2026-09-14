@@ -518,3 +518,6 @@ async def show_ticket_detail(query, session_id, tab="mine"):
         await _show_ticket_error(query, "Impossible d'afficher le ticket.")
 
 
+
+
+
