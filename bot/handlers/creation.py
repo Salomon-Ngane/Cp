@@ -135,7 +135,7 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         sid, tab = parts[1], parts[2]
         await show_ticket_detail(query, sid, tab)
 
-        elif data == "my_tickets" or data == "menu_tickets":
+    elif data == "my_tickets" or data == "menu_tickets":
         cancel_expired_sessions()
         sessions = get_user_sessions(user_id)
         if not sessions:
