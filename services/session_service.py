@@ -158,15 +158,52 @@ def join_session(session_id: str, joiner_id: int, predictions: list):
 def get_tickets_for_session(session_id: str) -> list:
     return supabase.table("tickets").select("*").eq("session_id", session_id).execute().data
 
-def get_user_sessions(user_id: int, history_limit: int = 3) -> list:
-    user_tickets = supabase.table("tickets").select("session_id").eq("user_id", user_id).execute().data
-    session_ids = [t["session_id"] for t in user_tickets]
+def get_user_sessions(user_id: int, history_limit: int = 4) -> list:
+    """Retourne les tickets actifs puis l'historique récent de l'utilisateur.
+
+    L'historique comprend les sessions terminées et les sessions annulées
+    (remboursées). ``history_limit=0`` conserve le comportement utilisé par
+    /live : seuls les tickets WAITING/IN_PROGRESS sont retournés.
+    """
+    user_tickets = (
+        supabase.table("tickets")
+        .select("session_id")
+        .eq("user_id", user_id)
+        .execute()
+        .data
+        or []
+    )
+    session_ids = list(dict.fromkeys(t["session_id"] for t in user_tickets if t.get("session_id")))
     if not session_ids:
         return []
 
-    active = supabase.table("sessions").select("*").in_("id", session_ids).in_("status", ["WAITING", "IN_PROGRESS"]).execute().data
-    completed = supabase.table("sessions").select("*").in_("id", session_ids).eq("status", "COMPLETED").order("created_at", desc=True).limit(history_limit).execute().data
-    return active + completed
+    active = (
+        supabase.table("sessions")
+        .select("*")
+        .in_("id", session_ids)
+        .in_("status", ["WAITING", "IN_PROGRESS"])
+        .order("created_at", desc=True)
+        .execute()
+        .data
+        or []
+    )
+
+    if history_limit <= 0:
+        return active
+
+    history = (
+        supabase.table("sessions")
+        .select("*")
+        .in_("id", session_ids)
+        .in_("status", ["COMPLETED", "CANCELLED"])
+        .order("created_at", desc=True)
+        .limit(history_limit)
+        .execute()
+        .data
+        or []
+    )
+
+    return active + history
 
 def cancel_expired_sessions():
     expiration_date = (datetime.now(timezone.utc) - timedelta(hours=config.SESSION_EXPIRATION_HOURS)).isoformat()
@@ -536,6 +573,10 @@ def get_api_quota() -> str:
     except Exception:
         pass
     return "Inconnu"
+
+
+
+
 
 
 
