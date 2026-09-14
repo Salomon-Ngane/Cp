@@ -135,10 +135,7 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         sid, tab = parts[1], parts[2]
         await show_ticket_detail(query, sid, tab)
 
-    elif data == "my_tickets":
-    from bot.handlers.tickets_view import _tickets_keyboard
-
-        from bot.handlers.tickets_view import _tickets_keyboard
+        elif data == "my_tickets":
         cancel_expired_sessions()
         sessions = get_user_sessions(user_id)
         if not sessions:
@@ -146,15 +143,14 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         else:
             await query.edit_message_text("📋 **Tes Tickets Clashsport**", reply_markup=_tickets_keyboard(sessions), parse_mode="Markdown")
 
-elif data == "live_all":
-    from services.session_service import get_user_sessions
-
+    elif data == "live_all":
         sessions = [s for s in get_user_sessions(user_id, history_limit=0) if s["status"] in ("WAITING", "IN_PROGRESS")]
         if not sessions:
             await query.edit_message_text("📭 Aucun duel en cours à suivre.", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
         else:
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]])
             await query.edit_message_text("🔴 Les matchs en direct sont accessibles dans chaque ticket.", reply_markup=keyboard, parse_mode="Markdown")
+
 
 
 async def handle_creation_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
