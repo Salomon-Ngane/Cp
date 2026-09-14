@@ -56,6 +56,12 @@ CREATION_CALLBACK_PREFIXES = (
     "my_tickets", "menu_tickets", "live_all", "menu_live", "ignore",
 )
 
+TOP_CALLBACK_PREFIXES = (
+    "topcat_",
+    "topshow_",
+    "top_back",
+)
+
 
 async def global_callback_router(update: Update, context):
     query = update.callback_query
@@ -64,12 +70,17 @@ async def global_callback_router(update: Update, context):
 
     data = query.data or ""
 
-    # creation.py acquitte déjà ces callbacks.
+    # creation.py acquitte déjà ses callbacks.
     if data.startswith(CREATION_CALLBACK_PREFIXES):
         await handle_creation_callback(update, context)
         return
 
-    # Chaque handler spécialisé acquitte désormais son propre callback.
+    # Le bouton « Classements » du menu principal utilise menu_top.
+    # Il doit être routé vers top.py, et non vers creation.py.
+    if data == "menu_top" or data.startswith(TOP_CALLBACK_PREFIXES):
+        await handle_top_callbacks(update, context)
+        return
+
     if data == "menu_account":
         try:
             await query.answer()
@@ -88,14 +99,6 @@ async def global_callback_router(update: Update, context):
 
     if data.startswith("buy_item_"):
         await handle_shop_buy(update, context)
-        return
-
-    if (
-        data.startswith("topcat_")
-        or data.startswith("topshow_")
-        or data == "top_back"
-    ):
-        await handle_top_callbacks(update, context)
         return
 
     # Compatibilité avec d'anciens callbacks.
@@ -148,5 +151,3 @@ async def cron_sweep(token: str = None):
 
     cancel_expired_sessions()
     return {"status": "success", "message": "Sessions expirées nettoyées."}
-
-
