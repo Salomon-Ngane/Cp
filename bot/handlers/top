@@ -72,39 +72,35 @@ async def handle_top_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         await show_period_menu(update, category)
         return
 
-    if data.startswith("topshow_"):
+        if data.startswith("topshow_"):
         parts = data.split("_")
         category = parts[1]
         period = parts[2]
         
-        # Récupération dynamique des données
-        board, min_volume = calculate_leaderboards(category, period)
+        # Récupération dynamique des données (Appel de ta fonction existante)
+        board = get_dynamic_leaderboard(category, period, limit=10)
         
         cat_name = CAT_NAMES.get(category, "Classement")
         per_name = PERIOD_NAMES.get(period, "Période")
         
-        text = f"🏆 **TOP 10 — {cat_name} ({per_name})**\n"
-        text += f"⚠️ *Volume de jeu minimum requis : {min_volume} Coins*\n\n"
+        text = f"🏆 **TOP 10 — {cat_name} ({per_name})**\n\n"
         
         if not board:
             text += "📭 Aucun joueur classé pour cette période."
         else:
             medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
             
-            for idx, p in enumerate(board[:10]):
+            for idx, p in enumerate(board):
                 medal = medals[idx] if idx < 10 else f"#{idx+1}"
-                qualif = "✅ Qualifié" if p["qualified"] else "❌ Volume Insuffisant"
-                
-                text += f"{medal} **{p['username']}** (`{p['user_code']}`)\n"
+                text += f"{medal} **{p['username']}**\n"
                 
                 if category == "winrate":
-                    text += f"   👉 `{p['winrate']}%` de réussite | Vol: {p['volume']}\n"
+                    text += f"   👉 `{p['score']:.1f}%` de réussite\n"
                 elif category == "network":
-                    text += f"   👉 `{p['network']}` filleuls | Vol: {p['volume']}\n"
+                    text += f"   👉 `{p['score']}` filleul(s)\n"
                 elif category == "volume":
-                    text += f"   👉 `{p['volume']}` Coins misés\n"
-                    
-                text += f"   Statut : {qualif}\n\n"
+                    text += f"   👉 `{p['score']}` Coins misés\n"
+                text += "\n"
         
         keyboard = [
             [InlineKeyboardButton("🔙 Retour aux périodes", callback_data=f"topcat_{category}")],
@@ -113,3 +109,4 @@ async def handle_top_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
