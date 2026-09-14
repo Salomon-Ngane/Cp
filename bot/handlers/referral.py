@@ -1,8 +1,9 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from database.users import get_user_by_id, get_user_grade
-from database.sessions import get_user_sessions, get_tickets_for_session, get_matches_by_ids
+from services.user_service import get_user_by_id, get_user_grade
+from services.session_service import get_user_sessions, get_tickets_for_session, get_matches_by_ids
+
 from bot.ui import main_menu_keyboard
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,8 @@ async def user_referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     active_refs = user.get("active_referrals_count", 0)
     grade_info = get_user_grade(active_refs)
     user_code = user.get("user_code", "N/A")
-    item_boosts = user.get("item_boost_count", 0)
+        item_boosts = user.get("item_1_count", 0)
+
 
     # Récupération du solde Don ❤️ Solidaire (ID 0)
     don_account = get_user_by_id(0)
