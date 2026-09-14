@@ -55,3 +55,30 @@ def toggle_cart_item(user_id: int, match_id: str, pick: str, odds: float, max_co
             "odds": float(odds)
         }).execute()
         return True
+
+
+def replace_cart_from_predictions(user_id: int, predictions: list) -> dict:
+    """Remplace le panier par une sélection issue d'un ancien ticket.
+
+    Les prédictions doivent avoir été validées par l'appelant. Une seule
+    insertion est utilisée afin d'éviter de laisser un panier partiellement
+    restauré en cas d'erreur d'insertion.
+    """
+    rows = [
+        {
+            "user_id": user_id,
+            "match_id": str(p["match_id"]),
+            "pick": p["pick"],
+            "odds": float(p.get("odds", 1.0)),
+        }
+        for p in predictions
+    ]
+
+    supabase.table("cart").delete().eq("user_id", user_id).execute()
+
+    if not rows:
+        return {"restored": 0, "data": []}
+
+    response = supabase.table("cart").insert(rows).execute()
+    return {"restored": len(response.data or rows), "data": response.data or []}
+
