@@ -79,6 +79,10 @@ async def handle_top_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
 
     data = query.data or ""
 
+    if data == "menu_top":
+        await show_category_menu(update)
+        return
+
     if data == "top_back":
         await show_category_menu(update)
         return
@@ -174,5 +178,6 @@ async def handle_top_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     await query.edit_message_text("❌ Action de classement inconnue.")
+
 
 
