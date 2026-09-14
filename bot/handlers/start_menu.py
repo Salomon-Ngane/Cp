@@ -63,3 +63,4 @@ async def handle_account_menu(query, user_id):
         [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
     ])
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
