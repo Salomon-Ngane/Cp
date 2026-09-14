@@ -44,10 +44,11 @@ async def _show_callback_error(query, message, back_callback="menu_duel"):
         [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")],
     ])
     try:
+        # Pas de Markdown ici : message peut contenir des caractères Telegram
+        # réservés (noms d'équipes, ligues, erreurs SQL, etc.).
         await query.edit_message_text(
             f"⚠️ {message}",
             reply_markup=keyboard,
-            parse_mode="Markdown",
         )
     except Exception:
         logger.exception("Impossible d'afficher l'erreur callback")
@@ -625,22 +626,14 @@ async def _show_ticket_summary(query, user_id):
     cart = get_cart(user_id)
 
     if not cart:
-        await _show_callback_error(
-            query,
-            "Votre panier est vide !",
-            "back_to_sports",
-        )
+        await _show_callback_error(query, "Votre panier est vide !", "back_to_sports")
         return
 
     joining_sid = draft.get("joining_session_id")
     if joining_sid:
         session = get_session(joining_sid)
         if not session or session.get("status") != "WAITING":
-            await _show_callback_error(
-                query,
-                "Ce salon n'est plus disponible.",
-                "list_public",
-            )
+            await _show_callback_error(query, "Ce salon n'est plus disponible.", "list_public")
             return
 
         expected_count = int(session.get("match_count", 1))
@@ -652,61 +645,53 @@ async def _show_ticket_summary(query, user_id):
             )
             return
 
-    match_ids = [item["match_id"] for item in cart]
+    match_ids = [str(item["match_id"]) for item in cart]
     try:
         matches = get_matches_by_ids(match_ids)
     except Exception:
         logger.exception("Erreur récupération résumé ticket %s", user_id)
+        await _show_callback_error(query, "Impossible de charger le résumé du ticket.", "back_to_sports")
+        return
+
+    # Ne jamais confirmer un ticket si un match sélectionné n'existe plus
+    # ou n'est plus disponible dans la base.
+    found_ids = {str(match.get("api_match_id")) for match in matches}
+    missing = [mid for mid in match_ids if mid not in found_ids]
+    if missing:
         await _show_callback_error(
             query,
-            "Impossible de charger le résumé du ticket.",
+            "Un ou plusieurs matchs sélectionnés ne sont plus disponibles. Actualise ton ticket.",
             "back_to_sports",
         )
         return
 
-    match_dict = {
-        str(match["api_match_id"]): match
-        for match in matches
-    }
+    match_dict = {str(match["api_match_id"]): match for match in matches}
 
-    text = "📋 **RÉSUMÉ DE VOTRE TICKET**\n\n"
-    text += f"🏷️ **Type :** `{draft.get('session_type', 'DUEL')}`\n"
-    text += f"💰 **Mise :** `{draft.get('gross_fee', 100)} Coins`\n"
-    text += f"🎯 **Sélection ({len(cart)} matchs) :**\n\n"
+    # Aucun Markdown : les noms d'équipes/ligues provenant de l'API peuvent
+    # contenir _, *, [, ], etc. et faire échouer edit_message_text().
+    text = "📋 RÉSUMÉ DE VOTRE TICKET\n\n"
+    text += f"🏷️ Type : {draft.get('session_type', 'DUEL')}\n"
+    text += f"💰 Mise : {draft.get('gross_fee', 100)} Coins\n"
+    text += f"🎯 Sélection ({len(cart)} matchs) :\n\n"
 
     for item in cart:
-        match = match_dict.get(str(item["match_id"]), {})
-        home = match.get("home_team", "Équipe A")
-        away = match.get("away_team", "Équipe B")
-        pick_str = (
-            "1" if item["pick"] == "HOME"
-            else "N" if item["pick"] == "DRAW"
-            else "2"
-        )
-
+        match = match_dict[str(item["match_id"])]
+        home = str(match.get("home_team") or "Équipe A")
+        away = str(match.get("away_team") or "Équipe B")
+        pick_str = "1" if item["pick"] == "HOME" else "N" if item["pick"] == "DRAW" else "2"
         text += f"🔹 {home} vs {away}\n"
-        text += (
-            f"👉 **Pronostic : {pick_str}** "
-            f"(Cote: {item['odds']})\n\n"
-        )
+        text += f"👉 Pronostic : {pick_str} (Cote : {item['odds']})\n\n"
 
-    text += "Êtes-vous sûr de vouloir valider ce ticket ?"
+    text += "Es-tu sûr de vouloir valider ce ticket ?"
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "✅ Confirmer la création",
-            callback_data="confirm_ticket",
-        )],
-        [InlineKeyboardButton(
-            "⬅️ Modifier mes choix",
-            callback_data="back_to_sports",
-        )],
+        [InlineKeyboardButton("✅ Confirmer la création", callback_data="confirm_ticket")],
+        [InlineKeyboardButton("⬅️ Modifier mes choix", callback_data="back_to_sports")],
     ])
 
     await query.edit_message_text(
         text,
         reply_markup=keyboard,
-        parse_mode="Markdown",
     )
 
 
@@ -740,6 +725,22 @@ async def _process_ticket_creation(query, user_id, context):
         for item in cart
     ]
     match_count = len(predictions)
+
+    try:
+        live_matches = get_matches_by_ids([p["match_id"] for p in predictions])
+    except Exception:
+        logger.exception("Erreur revalidation matchs avant confirmation %s", user_id)
+        await _show_callback_error(query, "Impossible de vérifier les matchs. Réessaie.", "back_to_sports")
+        return
+
+    live_ids = {str(m.get("api_match_id")) for m in live_matches}
+    if any(str(p["match_id"]) not in live_ids for p in predictions):
+        await _show_callback_error(
+            query,
+            "Un ou plusieurs matchs ne sont plus disponibles. Ton ticket n'a pas été débité.",
+            "back_to_sports",
+        )
+        return
 
     if joining_session_id:
         session = get_session(joining_session_id)
@@ -1142,3 +1143,4 @@ def _tickets_keyboard(sessions):
     ])
 
     return InlineKeyboardMarkup(keyboard)
+
