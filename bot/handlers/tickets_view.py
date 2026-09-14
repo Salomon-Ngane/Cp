@@ -5,514 +5,401 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from services.session_service import (
-get_user_sessions,
-get_session,
-get_tickets_for_session,
-get_matches_by_ids,
-get_estimated_end_time,
+    get_user_sessions,
+    get_session,
+    get_tickets_for_session,
+    get_matches_by_ids,
+    get_estimated_end_time,
 )
 from services.user_service import get_user_by_id
 from bot.ui import main_menu_keyboard
 
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
+
 
 async def user_tickets(
-update: Update,
-context: ContextTypes.DEFAULT_TYPE,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ):
-"""Commande /tickets : affiche les tickets de l'utilisateur."""
-user_id = update.effective_user.id
+    """Commande /tickets : affiche les tickets de l'utilisateur."""
+    user_id = update.effective_user.id
 
-try:
-    sessions = get_user_sessions(user_id)
-except Exception:
-    logger.exception(
-        "Erreur lors de la récupération des tickets pour %s",
-        user_id,
-    )
+    try:
+        sessions = get_user_sessions(user_id)
+    except Exception:
+        logger.exception(
+            "Erreur lors de la récupération des tickets pour %s",
+            user_id,
+        )
+
+        await update.message.reply_text(
+            "⚠️ Impossible de charger tes tickets pour le moment.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if not sessions:
+        await update.message.reply_text(
+            "📭 Vous n'avez aucun ticket pour l'instant.",
+            reply_markup=main_menu_keyboard(),
+            parse_mode="Markdown",
+        )
+        return
 
     await update.message.reply_text(
-        "⚠️ Impossible de charger tes tickets pour le moment.",
-        reply_markup=main_menu_keyboard(),
-    )
-    return
-
-if not sessions:
-    await update.message.reply_text(
-        "📭 Vous n'avez aucun ticket pour l'instant.",
-        reply_markup=main_menu_keyboard(),
+        "📋 **Tes Tickets Clashsport**",
+        reply_markup=_tickets_keyboard(sessions),
         parse_mode="Markdown",
     )
-    return
 
-await update.message.reply_text(
-    "📋 **Tes Tickets Clashsport**",
-    reply_markup=_tickets_keyboard(sessions),
-    parse_mode="Markdown",
-)
 
 async def user_live(
-update: Update,
-context: ContextTypes.DEFAULT_TYPE,
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ):
-"""Commande /live : affiche les sessions actives de l'utilisateur."""
-user_id = update.effective_user.id
+    """Commande /live : affiche les sessions actives de l'utilisateur."""
+    user_id = update.effective_user.id
 
-try:
-    sessions = get_user_sessions(
-        user_id,
-        history_limit=0,
-    )
-
-    sessions = [
-        session
-        for session in sessions
-        if session.get("status") in (
-            "WAITING",
-            "IN_PROGRESS",
+    try:
+        sessions = get_user_sessions(
+            user_id,
+            history_limit=0,
         )
-    ]
 
-except Exception:
-    logger.exception(
-        "Erreur lors de la récupération des matchs en direct pour %s",
-        user_id,
+        sessions = [
+            session
+            for session in sessions
+            if session.get("status") in (
+                "WAITING",
+                "IN_PROGRESS",
+            )
+        ]
+
+    except Exception:
+        logger.exception(
+            "Erreur lors de la récupération des matchs en direct pour %s",
+            user_id,
+        )
+
+        await update.message.reply_text(
+            "⚠️ Impossible de charger les matchs en direct pour le moment.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
+
+    if not sessions:
+        await update.message.reply_text(
+            "📭 Aucun duel en cours à suivre.",
+            reply_markup=main_menu_keyboard(),
+            parse_mode="Markdown",
+        )
+        return
+
+    keyboard = []
+
+    for session in sessions:
+        session_type = (
+            "🥊 Duel"
+            if session.get("type") == "DUEL"
+            else "🏟️ Arena"
+        )
+
+        status = session.get("status")
+
+        status_text = (
+            "⏳ En attente"
+            if status == "WAITING"
+            else "🔴 En cours"
+        )
+
+        fee = session.get("gross_entry_fee", 0)
+
+        label = (
+            f"{status_text} — "
+            f"{session_type} — "
+            f"{fee} Coins"
+        )
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"ticket_{session['id']}_mine",
+                )
+            ]
+        )
+
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "🏠 Menu Principal",
+                callback_data="menu_main",
+            )
+        ]
     )
 
     await update.message.reply_text(
-        "⚠️ Impossible de charger les matchs en direct pour le moment.",
-        reply_markup=main_menu_keyboard(),
-    )
-    return
-
-if not sessions:
-    await update.message.reply_text(
-        "📭 Aucun duel en cours à suivre.",
-        reply_markup=main_menu_keyboard(),
+        "🔴 **Mes matchs en direct**\n\n"
+        "Sélectionne un ticket pour suivre son évolution.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
-    return
 
-keyboard = []
-
-for session in sessions:
-    session_type = (
-        "🥊 Duel"
-        if session.get("type") == "DUEL"
-        else "🏟️ Arena"
-    )
-
-    status = session.get("status")
-
-    status_text = (
-        "⏳ En attente"
-        if status == "WAITING"
-        else "🔴 En cours"
-    )
-
-    fee = session.get("gross_entry_fee", 0)
-
-    label = (
-        f"{status_text} — "
-        f"{session_type} — "
-        f"{fee} Coins"
-    )
-
-    keyboard.append(
-        [
-            InlineKeyboardButton(
-                label,
-                callback_data=f"ticket_{session['id']}_mine",
-            )
-        ]
-    )
-
-keyboard.append(
-    [
-        InlineKeyboardButton(
-            "🏠 Menu Principal",
-            callback_data="menu_main",
-        )
-    ]
-)
-
-await update.message.reply_text(
-    "🔴 **Mes matchs en direct**\n\n"
-    "Sélectionne un ticket pour suivre son évolution.",
-    reply_markup=InlineKeyboardMarkup(keyboard),
-    parse_mode="Markdown",
-)
 
 def _tickets_keyboard(sessions):
-"""Génère le clavier de la liste des tickets."""
-keyboard = []
+    """Génère le clavier de la liste des tickets."""
+    keyboard = []
 
-for session in sessions:
-    status = session.get("status")
+    for session in sessions:
+        status = session.get("status")
 
-    status_icon = (
-        "⏳"
-        if status == "WAITING"
-        else "🔴"
-        if status == "IN_PROGRESS"
-        else "✅"
-        if status == "COMPLETED"
-        else "❌"
-    )
+        status_icon = (
+            "⏳"
+            if status == "WAITING"
+            else "🔴"
+            if status == "IN_PROGRESS"
+            else "✅"
+            if status == "COMPLETED"
+            else "❌"
+        )
 
-    session_type = (
-        "Duel"
-        if session.get("type") == "DUEL"
-        else "Arena"
-    )
+        session_type = (
+            "Duel"
+            if session.get("type") == "DUEL"
+            else "Arena"
+        )
 
-    fee = session.get("gross_entry_fee", 0)
+        fee = session.get("gross_entry_fee", 0)
 
-    label = (
-        f"{status_icon} "
-        f"{session_type} - "
-        f"{fee} Coins"
-    )
+        label = (
+            f"{status_icon} "
+            f"{session_type} - "
+            f"{fee} Coins"
+        )
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"ticket_{session['id']}_mine",
+                )
+            ]
+        )
 
     keyboard.append(
         [
             InlineKeyboardButton(
-                label,
-                callback_data=f"ticket_{session['id']}_mine",
+                "⬅️ Retour",
+                callback_data="menu_main",
             )
         ]
     )
 
-keyboard.append(
-    [
-        InlineKeyboardButton(
-            "⬅️ Retour",
-            callback_data="menu_main",
-        )
-    ]
-)
+    return InlineKeyboardMarkup(keyboard)
 
-return InlineKeyboardMarkup(keyboard)
 
 async def show_ticket_detail(
-query,
-session_id,
-tab="mine",
+    query,
+    session_id,
+    tab="mine",
 ):
-"""Affiche le détail complet d'un ticket."""
+    """Affiche le détail complet d'un ticket."""
 
-user_id = query.from_user.id
+    user_id = query.from_user.id
 
-try:
-    session = get_session(session_id)
-except Exception:
-    logger.exception(
-        "Erreur lors de la récupération de la session %s",
-        session_id,
-    )
-
-    await query.answer(
-        "Impossible de charger ce ticket.",
-        show_alert=True,
-    )
-    return
-
-if not session:
-    await query.answer(
-        "Ticket introuvable.",
-        show_alert=True,
-    )
-    return
-
-# ---------------------------------------------------------
-# DATE DE CREATION
-# ---------------------------------------------------------
-
-created_at_str = session.get("created_at")
-
-if created_at_str:
     try:
-        created_dt = datetime.fromisoformat(
-            str(created_at_str).replace(
-                "Z",
-                "+00:00",
-            )
+        session = get_session(session_id)
+    except Exception:
+        logger.exception(
+            "Erreur lors de la récupération de la session %s",
+            session_id,
         )
 
-        date_creation = created_dt.strftime(
-            "%d/%m/%Y à %H:%M"
+        await query.answer(
+            "Impossible de charger ce ticket.",
+            show_alert=True,
         )
+        return
 
-    except (ValueError, TypeError):
-        date_creation = "Inconnue"
+    if not session:
+        await query.answer(
+            "Ticket introuvable.",
+            show_alert=True,
+        )
+        return
 
-else:
-    date_creation = "Inconnue"
+    # ---------------------------------------------------------
+    # DATE DE CREATION
+    # ---------------------------------------------------------
 
-# ---------------------------------------------------------
-# RECUPERATION DES TICKETS
-# ---------------------------------------------------------
+    created_at_str = session.get("created_at")
 
-try:
-    all_tickets = get_tickets_for_session(
-        session_id
-    )
-except Exception:
-    logger.exception(
-        "Erreur lors de la récupération des tickets "
-        "de la session %s",
-        session_id,
-    )
-
-    await query.answer(
-        "Impossible de charger les tickets.",
-        show_alert=True,
-    )
-    return
-
-# ---------------------------------------------------------
-# RECUPERATION DES MATCHS
-# ---------------------------------------------------------
-
-all_match_ids = set()
-
-for ticket in all_tickets:
-    predictions = ticket.get(
-        "predictions",
-        [],
-    )
-
-    for prediction in predictions:
-        match_id = prediction.get("match_id")
-
-        if match_id is not None:
-            all_match_ids.add(
-                str(match_id)
+    if created_at_str:
+        try:
+            created_dt = datetime.fromisoformat(
+                str(created_at_str).replace(
+                    "Z",
+                    "+00:00",
+                )
             )
 
-try:
-    all_matches = get_matches_by_ids(
-        list(all_match_ids)
-    )
-except Exception:
-    logger.exception(
-        "Erreur lors de la récupération des matchs "
-        "de la session %s",
-        session_id,
-    )
+            date_creation = created_dt.strftime(
+                "%d/%m/%Y à %H:%M"
+            )
 
-    all_matches = []
-
-# ---------------------------------------------------------
-# DATE DE FIN ESTIMEE
-# ---------------------------------------------------------
-
-try:
-    end_dt = get_estimated_end_time(
-        all_matches
-    )
-
-    date_fin = end_dt.strftime(
-        "%d/%m/%Y à %H:%M"
-    )
-
-except Exception:
-    logger.exception(
-        "Erreur lors du calcul de la fin estimée "
-        "de la session %s",
-        session_id,
-    )
-
-    date_fin = "Inconnue"
-
-# ---------------------------------------------------------
-# ENTETE
-# ---------------------------------------------------------
-
-session_type = session.get(
-    "type",
-    "N/A",
-)
-
-gross_fee = session.get(
-    "gross_entry_fee",
-    0,
-)
-
-session_status = session.get(
-    "status",
-    "N/A",
-)
-
-text = (
-    "🎫 **Détail du Ticket**\n\n"
-    f"📅 **Créé le :** `{date_creation}`\n"
-    f"🏁 **Fin estimée :** `{date_fin}`\n"
-    f"🏷️ **Type :** `{session_type}`\n"
-    f"💰 **Mise :** `{gross_fee} Coins`\n"
-    f"📊 **Statut :** `{session_status}`\n\n"
-)
-
-# ---------------------------------------------------------
-# DICTIONNAIRE DES MATCHS
-# ---------------------------------------------------------
-
-match_dict = {}
-
-for match in all_matches:
-    match_id = match.get("api_match_id")
-
-    if match_id is not None:
-        match_dict[str(match_id)] = match
-
-# ---------------------------------------------------------
-# TICKET DE L'UTILISATEUR
-# ---------------------------------------------------------
-
-my_ticket = next(
-    (
-        ticket
-        for ticket in all_tickets
-        if str(ticket.get("user_id")) == str(user_id)
-    ),
-    None,
-)
-
-# ---------------------------------------------------------
-# MES PRONOSTICS
-# ---------------------------------------------------------
-
-if tab == "mine":
-
-    if not my_ticket:
-        text += (
-            "📭 **Aucun pronostic trouvé "
-            "pour ce ticket.**"
-        )
+        except (ValueError, TypeError):
+            date_creation = "Inconnue"
 
     else:
-        text += (
-            "🎯 **Mes Pronostics :**\n\n"
+        date_creation = "Inconnue"
+
+    # ---------------------------------------------------------
+    # RECUPERATION DES TICKETS
+    # ---------------------------------------------------------
+
+    try:
+        all_tickets = get_tickets_for_session(
+            session_id
+        )
+    except Exception:
+        logger.exception(
+            "Erreur lors de la récupération des tickets "
+            "de la session %s",
+            session_id,
         )
 
-        predictions = my_ticket.get(
+        await query.answer(
+            "Impossible de charger les tickets.",
+            show_alert=True,
+        )
+        return
+
+    # ---------------------------------------------------------
+    # RECUPERATION DES MATCHS
+    # ---------------------------------------------------------
+
+    all_match_ids = set()
+
+    for ticket in all_tickets:
+        predictions = ticket.get(
             "predictions",
             [],
         )
 
         for prediction in predictions:
+            match_id = prediction.get("match_id")
 
-            match = match_dict.get(
-                str(
-                    prediction.get(
-                        "match_id"
-                    )
-                ),
-                {},
-            )
+            if match_id is not None:
+                all_match_ids.add(
+                    str(match_id)
+                )
 
-            home = match.get(
-                "home_team",
-                "Équipe A",
-            )
-
-            away = match.get(
-                "away_team",
-                "Équipe B",
-            )
-
-            pick = prediction.get(
-                "pick"
-            )
-
-            pick_str = (
-                "1"
-                if pick == "HOME"
-                else "N"
-                if pick == "DRAW"
-                else "2"
-            )
-
-            prediction_status = prediction.get(
-                "status",
-                "PENDING",
-            )
-
-            status_emoji = (
-                "⏳"
-                if prediction_status == "PENDING"
-                else "✅"
-                if prediction_status == "WON"
-                else "❌"
-            )
-
-            odds = prediction.get(
-                "odds",
-                1.0,
-            )
-
-            text += (
-                f"🔹 {home} vs {away}\n"
-                f"👉 {status_emoji} "
-                f"**{pick_str}** "
-                f"(Cote: {odds})\n\n"
-            )
-
-# ---------------------------------------------------------
-# ADVERSAIRES
-# ---------------------------------------------------------
-
-elif tab == "opponents":
-
-    opponents = [
-        ticket
-        for ticket in all_tickets
-        if str(ticket.get("user_id"))
-        != str(user_id)
-    ]
-
-    if not opponents:
-        text += (
-            "⏳ **En attente d'adversaires...**"
+    try:
+        all_matches = get_matches_by_ids(
+            list(all_match_ids)
+        )
+    except Exception:
+        logger.exception(
+            "Erreur lors de la récupération des matchs "
+            "de la session %s",
+            session_id,
         )
 
-    else:
-        text += (
-            "👥 **Adversaires :**\n\n"
+        all_matches = []
+
+    # ---------------------------------------------------------
+    # DATE DE FIN ESTIMEE
+    # ---------------------------------------------------------
+
+    try:
+        end_dt = get_estimated_end_time(
+            all_matches
         )
 
-        for ticket in opponents:
+        date_fin = end_dt.strftime(
+            "%d/%m/%Y à %H:%M"
+        )
 
-            opponent_id = ticket.get(
-                "user_id"
-            )
+    except Exception:
+        logger.exception(
+            "Erreur lors du calcul de la fin estimée "
+            "de la session %s",
+            session_id,
+        )
 
-            try:
-                opponent = get_user_by_id(
-                    opponent_id
-                )
-            except Exception:
-                logger.exception(
-                    "Erreur lors de la récupération "
-                    "du joueur %s",
-                    opponent_id,
-                )
-                opponent = None
+        date_fin = "Inconnue"
 
-            username = (
-                opponent.get(
-                    "username",
-                    "Joueur",
-                )
-                if opponent
-                else "Joueur"
-            )
+    # ---------------------------------------------------------
+    # ENTETE
+    # ---------------------------------------------------------
 
+    session_type = session.get(
+        "type",
+        "N/A",
+    )
+
+    gross_fee = session.get(
+        "gross_entry_fee",
+        0,
+    )
+
+    session_status = session.get(
+        "status",
+        "N/A",
+    )
+
+    text = (
+        "🎫 **Détail du Ticket**\n\n"
+        f"📅 **Créé le :** `{date_creation}`\n"
+        f"🏁 **Fin estimée :** `{date_fin}`\n"
+        f"🏷️ **Type :** `{session_type}`\n"
+        f"💰 **Mise :** `{gross_fee} Coins`\n"
+        f"📊 **Statut :** `{session_status}`\n\n"
+    )
+
+    # ---------------------------------------------------------
+    # DICTIONNAIRE DES MATCHS
+    # ---------------------------------------------------------
+
+    match_dict = {}
+
+    for match in all_matches:
+        match_id = match.get("api_match_id")
+
+        if match_id is not None:
+            match_dict[str(match_id)] = match
+
+    # ---------------------------------------------------------
+    # TICKET DE L'UTILISATEUR
+    # ---------------------------------------------------------
+
+    my_ticket = next(
+        (
+            ticket
+            for ticket in all_tickets
+            if str(ticket.get("user_id")) == str(user_id)
+        ),
+        None,
+    )
+
+    # ---------------------------------------------------------
+    # MES PRONOSTICS
+    # ---------------------------------------------------------
+
+    if tab == "mine":
+
+        if not my_ticket:
             text += (
-                f"👤 **{username}**\n"
+                "📭 **Aucun pronostic trouvé "
+                "pour ce ticket.**"
             )
 
-            predictions = ticket.get(
+        else:
+            text += (
+                "🎯 **Mes Pronostics :**\n\n"
+            )
+
+            predictions = my_ticket.get(
                 "predictions",
                 [],
             )
@@ -530,12 +417,12 @@ elif tab == "opponents":
 
                 home = match.get(
                     "home_team",
-                    "A",
+                    "Équipe A",
                 )
 
                 away = match.get(
                     "away_team",
-                    "B",
+                    "Équipe B",
                 )
 
                 pick = prediction.get(
@@ -550,83 +437,199 @@ elif tab == "opponents":
                     else "2"
                 )
 
-                text += (
-                    f"  • {home[:10]} - "
-                    f"{away[:10]} "
-                    f"👉 **{pick_str}**\n"
+                prediction_status = prediction.get(
+                    "status",
+                    "PENDING",
                 )
 
-            text += "\n"
+                status_emoji = (
+                    "⏳"
+                    if prediction_status == "PENDING"
+                    else "✅"
+                    if prediction_status == "WON"
+                    else "❌"
+                )
 
-# ---------------------------------------------------------
-# CLAVIER
-# ---------------------------------------------------------
+                odds = prediction.get(
+                    "odds",
+                    1.0,
+                )
 
-keyboard = []
+                text += (
+                    f"🔹 {home} vs {away}\n"
+                    f"👉 {status_emoji} "
+                    f"**{pick_str}** "
+                    f"(Cote: {odds})\n\n"
+                )
 
-if tab == "mine":
+    # ---------------------------------------------------------
+    # ADVERSAIRES
+    # ---------------------------------------------------------
 
-    keyboard.append(
-        [
-            InlineKeyboardButton(
-                "👥 Voir les adversaires",
-                callback_data=(
-                    f"ticket_"
-                    f"{session_id}_"
-                    f"opponents"
-                ),
-            )
+    elif tab == "opponents":
+
+        opponents = [
+            ticket
+            for ticket in all_tickets
+            if str(ticket.get("user_id"))
+            != str(user_id)
         ]
-    )
 
-else:
-
-    keyboard.append(
-        [
-            InlineKeyboardButton(
-                "🎯 Voir mes pronostics",
-                callback_data=(
-                    f"ticket_"
-                    f"{session_id}_"
-                    f"mine"
-                ),
+        if not opponents:
+            text += (
+                "⏳ **En attente d'adversaires...**"
             )
-        ]
-    )
 
-keyboard.append(
-    [
-        InlineKeyboardButton(
-            "⬅️ Retour aux tickets",
-            callback_data="my_tickets",
+        else:
+            text += (
+                "👥 **Adversaires :**\n\n"
+            )
+
+            for ticket in opponents:
+
+                opponent_id = ticket.get(
+                    "user_id"
+                )
+
+                try:
+                    opponent = get_user_by_id(
+                        opponent_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "Erreur lors de la récupération "
+                        "du joueur %s",
+                        opponent_id,
+                    )
+                    opponent = None
+
+                username = (
+                    opponent.get(
+                        "username",
+                        "Joueur",
+                    )
+                    if opponent
+                    else "Joueur"
+                )
+
+                text += (
+                    f"👤 **{username}**\n"
+                )
+
+                predictions = ticket.get(
+                    "predictions",
+                    [],
+                )
+
+                for prediction in predictions:
+
+                    match = match_dict.get(
+                        str(
+                            prediction.get(
+                                "match_id"
+                            )
+                        ),
+                        {},
+                    )
+
+                    home = match.get(
+                        "home_team",
+                        "A",
+                    )
+
+                    away = match.get(
+                        "away_team",
+                        "B",
+                    )
+
+                    pick = prediction.get(
+                        "pick"
+                    )
+
+                    pick_str = (
+                        "1"
+                        if pick == "HOME"
+                        else "N"
+                        if pick == "DRAW"
+                        else "2"
+                    )
+
+                    text += (
+                        f"  • {home[:10]} - "
+                        f"{away[:10]} "
+                        f"👉 **{pick_str}**\n"
+                    )
+
+                text += "\n"
+
+    # ---------------------------------------------------------
+    # CLAVIER
+    # ---------------------------------------------------------
+
+    keyboard = []
+
+    if tab == "mine":
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "👥 Voir les adversaires",
+                    callback_data=(
+                        f"ticket_"
+                        f"{session_id}_"
+                        f"opponents"
+                    ),
+                )
+            ]
         )
-    ]
-)
 
-# ---------------------------------------------------------
-# AFFICHAGE
-# ---------------------------------------------------------
+    else:
 
-try:
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
-        parse_mode="Markdown",
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "🎯 Voir mes pronostics",
+                    callback_data=(
+                        f"ticket_"
+                        f"{session_id}_"
+                        f"mine"
+                    ),
+                )
+            ]
+        )
+
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "⬅️ Retour aux tickets",
+                callback_data="my_tickets",
+            )
+        ]
     )
 
-except Exception:
-    logger.exception(
-        "Erreur lors de l'affichage du ticket %s",
-        session_id,
-    )
+    # ---------------------------------------------------------
+    # AFFICHAGE
+    # ---------------------------------------------------------
 
     try:
-        await query.answer(
-            "Impossible d'afficher ce ticket.",
-            show_alert=True,
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            ),
+            parse_mode="Markdown",
         )
-    except Exception:
-        pass
 
+    except Exception:
+        logger.exception(
+            "Erreur lors de l'affichage du ticket %s",
+            session_id,
+        )
+
+        try:
+            await query.answer(
+                "Impossible d'afficher ce ticket.",
+                show_alert=True,
+            )
+        except Exception:
+            pass
