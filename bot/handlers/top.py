@@ -68,14 +68,17 @@ async def handle_top_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if data.startswith("topcat_"):
-        category = data.split("_")[1]
-        await show_period_menu(update, category)
-        return
+    category = data.split("_")[1]
+    await show_period_menu(update, category)
+    return
 
-        if data.startswith("topshow_"):
-        parts = data.split("_")
-        category = parts[1]
-        period = parts[2]
+if data.startswith("topshow_"):
+    parts = data.split("_")
+    category = parts[1]
+    period = parts[2]
+
+    board = get_dynamic_leaderboard(category, period, limit=10)
+    ...
         
         # Récupération dynamique des données (Appel de ta fonction existante)
         board = get_dynamic_leaderboard(category, period, limit=10)
