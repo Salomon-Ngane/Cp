@@ -104,3 +104,35 @@ def award_item(telegram_id: int, item_type: int):
         supabase.table("users").update({field: current + 1}).eq("telegram_id", telegram_id).execute()
         return True
     return False
+    # --- BOUTIQUE ---
+SHOP_PRICES = {1: 500, 2: 1000}
+REQUIRED_GRADES = {1: 1, 2: 2}
+
+def buy_item_from_shop(telegram_id: int, item_id: int) -> tuple[bool, str]:
+    user = get_user_by_id(telegram_id)
+    if not user:
+        return False, "Utilisateur introuvable."
+    if item_id not in SHOP_PRICES:
+        return False, "Cet Item n'est pas disponible à la vente."
+
+    price = SHOP_PRICES[item_id]
+    if int(user.get("coins_balance", 0)) < price:
+        return False, f"Fonds insuffisants. Il vous faut {price} Coins."
+
+    grade_info = get_user_grade(user.get("active_referrals_count", 0))
+    if grade_info["level"] < REQUIRED_GRADES[item_id]:
+        return False, f"Grade insuffisant. L'Item {item_id} requiert le grade de niveau {REQUIRED_GRADES[item_id]}."
+
+    item_key = f"item_{item_id}_count"
+    current_qty = user.get(item_key, 0)
+    if current_qty >= 3:
+        return False, f"Votre sac est plein ! Vous possédez déjà 3x Item {item_id}."
+
+    new_balance = int(user["coins_balance"]) - price
+    supabase.table("users").update({
+        "coins_balance": new_balance,
+        item_key: current_qty + 1
+    }).eq("telegram_id", telegram_id).execute()
+    
+    return True, f"✅ Achat réussi ! 1x Item {item_id} ajouté à votre sac."
+
