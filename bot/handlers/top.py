@@ -4,8 +4,6 @@ from telegram.ext import ContextTypes
 from services.session_service import calculate_leaderboards
 
 logger = logging.getLogger(__name__)
-# (Le reste du code de top.py ne change pas)
-
 
 # Dictionnaires pour un affichage propre
 CAT_NAMES = {
@@ -27,16 +25,16 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_category_menu(update: Update):
     """Affiche les boutons de choix de la catégorie de classement."""
     text = "🏆 **CLASSEMENTS CLASHSPORT**\n\nChoisissez la catégorie de classement que vous souhaitez consulter :"
-    
+
     keyboard = [
         [InlineKeyboardButton("🎯 Taux de Réussite", callback_data="topcat_winrate")],
         [InlineKeyboardButton("👥 Nouveaux Filleuls (Parrains)", callback_data="topcat_network")],
         [InlineKeyboardButton("🔥 Volume de Jeu (Gros parieurs)", callback_data="topcat_volume")],
         [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
     ]
-    
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     else:
@@ -46,14 +44,14 @@ async def show_period_menu(update: Update, category: str):
     """Affiche les boutons de choix de la période pour une catégorie donnée."""
     cat_name = CAT_NAMES.get(category, "Classement")
     text = f"🏆 **{cat_name}**\n\nChoisissez la période :"
-    
+
     keyboard = [
         [InlineKeyboardButton("⏳ 24 Heures", callback_data=f"topshow_{category}_day")],
         [InlineKeyboardButton("📅 7 Jours", callback_data=f"topshow_{category}_week")],
         [InlineKeyboardButton("🗓️ 30 Jours", callback_data=f"topshow_{category}_month")],
         [InlineKeyboardButton("🔙 Retour aux catégories", callback_data="top_back")]
     ]
-    
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
@@ -75,41 +73,41 @@ async def handle_top_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         parts = data.split("_")
         category = parts[1]
         period = parts[2]
-        
-        # Récupération dynamique des données
+
         board, min_volume = calculate_leaderboards(category, period)
-        
+
         cat_name = CAT_NAMES.get(category, "Classement")
         per_name = PERIOD_NAMES.get(period, "Période")
-        
+
         text = f"🏆 **TOP 10 — {cat_name} ({per_name})**\n"
         text += f"⚠️ *Volume de jeu minimum requis : {min_volume} Coins*\n\n"
-        
+
         if not board:
             text += "📭 Aucun joueur classé pour cette période."
         else:
             medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-            
+
             for idx, p in enumerate(board[:10]):
                 medal = medals[idx] if idx < 10 else f"#{idx+1}"
                 qualif = "✅ Qualifié" if p["qualified"] else "❌ Volume Insuffisant"
-                
+
                 text += f"{medal} **{p['username']}** (`{p['user_code']}`)\n"
-                
+
                 if category == "winrate":
                     text += f"   👉 `{p['winrate']}%` de réussite | Vol: {p['volume']}\n"
                 elif category == "network":
                     text += f"   👉 `{p['network']}` filleuls | Vol: {p['volume']}\n"
                 elif category == "volume":
                     text += f"   👉 `{p['volume']}` Coins misés\n"
-                    
+
                 text += f"   Statut : {qualif}\n\n"
-        
+
         keyboard = [
             [InlineKeyboardButton("🔙 Retour aux périodes", callback_data=f"topcat_{category}")],
             [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
         ]
-        
+
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
 
