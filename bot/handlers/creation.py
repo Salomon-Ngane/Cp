@@ -24,7 +24,7 @@ from services.session_service import (
 )
 from services.user_service import get_user_by_id
 from bot.ui import main_menu_keyboard
-from bot.handlers.tickets_view import show_ticket_detail
+from bot.handlers.tickets_view import show_ticket_detail, replay_ticket_to_cart
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +257,11 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
             await _show_callback_error(query, "Ticket invalide.", "my_tickets")
             return
         sid, tab = parts[1], parts[2]
-        await show_ticket_detail(query, sid, tab)
+
+        if tab == "replay":
+            await replay_ticket_to_cart(query, sid)
+        else:
+            await show_ticket_detail(query, sid, tab)
 
     elif data in ("my_tickets", "menu_tickets"):
         try:
@@ -281,7 +285,7 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         else:
             await query.edit_message_text(
                 "📋 **Tes Tickets Clashsport**",
-                reply_markup=_tickets_keyboard(sessions),
+                reply_markup=_tickets_keyboard(sessions, user_id),
                 parse_mode="Markdown",
             )
 
@@ -1117,31 +1121,71 @@ async def propose_join_duel(message, user_id, session_id, context):
     )
 
 
-def _tickets_keyboard(sessions):
+def _tickets_keyboard(sessions, user_id=None):
+    user_id = user_id if user_id is not None else 0
+    active = [
+        s for s in sessions
+        if s.get("status") in ("WAITING", "IN_PROGRESS")
+    ]
+    history = [
+        s for s in sessions
+        if s.get("status") in ("COMPLETED", "CANCELLED")
+    ][:4]
+
+    def status_label(session):
+        status = session.get("status")
+        if status == "WAITING":
+            return "⏳ En attente"
+        if status == "IN_PROGRESS":
+            return "🔴 En cours"
+        if status == "CANCELLED":
+            return "🟡 Remboursé"
+        if status == "COMPLETED":
+            if session.get("type") == "DUEL" and session.get("winner_id") is None:
+                return "🟡 Remboursé"
+            if str(session.get("winner_id")) == str(user_id):
+                return "🟢 Gagné"
+            return "🔴 Perdu"
+        return "⚪ " + str(status or "Inconnu")
+
     keyboard = []
 
-    for session in sessions:
-        status = session.get("status")
-        icon = (
-            "⏳" if status == "WAITING"
-            else "🔴" if status == "IN_PROGRESS"
-            else "✅" if status == "COMPLETED"
-            else "❌"
-        )
-        stype = "Duel" if session.get("type") == "DUEL" else "Arena"
-        fee = session.get("gross_entry_fee", 0)
-
+    if active:
         keyboard.append([
-            InlineKeyboardButton(
-                f"{icon} {stype} - {fee} Coins",
-                callback_data=f"ticket_{session['id']}_mine",
-            )
+            InlineKeyboardButton("🔴 TICKETS EN COURS", callback_data="ignore")
         ])
+        for session in active:
+            stype = "Duel" if session.get("type") == "DUEL" else "Arena"
+            fee = session.get("gross_entry_fee", 0)
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{status_label(session)} — {stype} — {fee} Coins",
+                    callback_data=f"ticket_{session['id']}_mine",
+                )
+            ])
 
+    if history:
+        keyboard.append([
+            InlineKeyboardButton("📜 HISTORIQUE — 4 DERNIERS", callback_data="ignore")
+        ])
+        for session in history:
+            stype = "Duel" if session.get("type") == "DUEL" else "Arena"
+            fee = session.get("gross_entry_fee", 0)
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{status_label(session)} — {stype} — {fee} Coins",
+                    callback_data=f"ticket_{session['id']}_mine",
+                )
+            ])
+
+    keyboard.append([
+        InlineKeyboardButton("➕ Créer un nouveau ticket", callback_data="menu_duel")
+    ])
     keyboard.append([
         InlineKeyboardButton("⬅️ Retour", callback_data="menu_main")
     ])
 
     return InlineKeyboardMarkup(keyboard)
+
 
 
