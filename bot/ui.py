@@ -4,8 +4,8 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     """Génère le clavier du menu principal de Clashsport."""
     keyboard = [
         [
-            InlineKeyboardButton("🥊 Créer un Duel", callback_data="create_duel"),
-            InlineKeyboardButton("🏟️ Créer une Arena", callback_data="create_arena")
+            InlineKeyboardButton("🥊 Créer un Duel", callback_data="menu_duel"),
+            InlineKeyboardButton("🏟️ Créer une Arena", callback_data="menu_duel")
         ],
         [
             InlineKeyboardButton("🎫 Mes Tickets", callback_data="menu_tickets"),
@@ -27,4 +27,6 @@ def back_to_main_menu_keyboard() -> InlineKeyboardMarkup:
     """Génère un bouton de retour au menu principal."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
+    ])
+
     ])
