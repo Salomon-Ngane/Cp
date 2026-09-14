@@ -6,7 +6,16 @@ from telegram.ext import ContextTypes
 import config
 from database.connection import supabase
 from database.cart import get_draft_settings, update_draft_settings, clear_draft, toggle_cart_item, get_cart
-from services.session_service import get_matches_by_sport, get_matches_by_ids, create_session, join_session, get_session, get_tickets_for_session
+from services.session_service import (
+    get_matches_by_sport,
+    get_matches_by_ids,
+    create_session,
+    join_session,
+    get_session,
+    get_tickets_for_session,
+    get_user_sessions,
+    cancel_expired_sessions,
+)
 from services.user_service import get_user_by_id
 
 from bot.ui import main_menu_keyboard
