@@ -151,3 +151,4 @@ async def cron_sweep(token: str = None):
 
     cancel_expired_sessions()
     return {"status": "success", "message": "Sessions expirées nettoyées."}
+
