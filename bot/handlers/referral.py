@@ -12,14 +12,14 @@ async def user_referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Affiche le tableau de bord de parrainage, les grades et les statistiques du réseau."""
     user_id = update.effective_user.id
     user = get_user_by_id(user_id)
-    
+
     if not user:
         return
 
     active_refs = user.get("active_referrals_count", 0)
     grade_info = get_user_grade(active_refs)
     user_code = user.get("user_code", "N/A")
-item_boosts = user.get("item_1_count", 0)
+    item_boosts = user.get("item_1_count", 0)
 
     # Récupération du solde Don ❤️ Solidaire (ID 0)
     don_account = get_user_by_id(0)
@@ -67,7 +67,7 @@ async def user_my_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scode = s.get("session_code", "N/A")
         text += f"🔹 **{stype} ({s['gross_entry_fee']} Coins)**\n"
         text += f"👉 Code Session : `{scode}`\n"
-        
+
         # Liste des Match IDs associés
         tickets = get_tickets_for_session(s["id"])
         my_t = next((t for t in tickets if t["user_id"] == user_id), None)
@@ -77,3 +77,4 @@ async def user_my_ids(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]])
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
+
