@@ -85,7 +85,9 @@ def create_session(creator_id: int, session_type: str, gross_fee: int, match_cou
     if not user or int(user["coins_balance"]) < gross_fee:
         return None, "Solde insuffisant pour créer ce duel."
 
-    net_fee = gross_fee - int(round(gross_fee * 0.08))
+    rake_rate = config.RAKE_1V1 if session_type == "DUEL" else config.RAKE_ARENA
+    rake_amount = int(round(gross_fee * rake_rate))
+    net_fee = gross_fee - rake_amount
     session_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=7))
 
     session_data = {
@@ -107,6 +109,8 @@ def create_session(creator_id: int, session_type: str, gross_fee: int, match_cou
         new_balance = int(user["coins_balance"]) - gross_fee
         supabase.table("users").update({"coins_balance": new_balance}).eq("telegram_id", creator_id).execute()
 
+        # Don Solidaire reçoit 2,6 % de la mise brute. Le reste du rake
+        # reste à la plateforme : 7,4 % en Duel (10 % total) ou 4,9 % en Arena (7,5 % total).
         donation_share = int(round(gross_fee * config.DON_SHARE_FROM_RAKE))
         if donation_share > 0:
             credit_balance(0, donation_share)
@@ -532,4 +536,5 @@ def get_api_quota() -> str:
     except Exception:
         pass
     return "Inconnu"
+
 
