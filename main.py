@@ -15,6 +15,9 @@ from bot.handlers.admin import (
 from bot.handlers.tickets_view import user_tickets, user_live
 from bot.handlers.creation import handle_creation_callback, handle_creation_text_input
 from services.session_service import cancel_expired_sessions
+from bot.handlers.referral import user_referral_menu, user_my_ids
+from bot.handlers.shop import shop_menu, handle_shop_buy
+from bot.handlers.top import top_command, handle_top_callbacks, show_category_menu
 
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -44,10 +47,23 @@ telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_
 
 async def global_callback_router(update: Update, context):
     query = update.callback_query
-    if query.data == "menu_account":
+    data = query.data
+    
+    if data == "menu_account":
         await handle_account_menu(query, query.from_user.id)
+    elif data == "menu_network":
+        await user_referral_menu(update, context)
+    elif data == "menu_shop":
+        await shop_menu(update, context)
+    elif data == "menu_top":
+        await show_category_menu(update)
+    elif data.startswith("buy_item_"):
+        await handle_shop_buy(update, context)
+    elif data.startswith("topcat_") or data.startswith("topshow_") or data == "top_back":
+        await handle_top_callbacks(update, context)
     else:
         await handle_creation_callback(update, context)
+
 
 telegram_app.add_handler(CallbackQueryHandler(global_callback_router))
 
