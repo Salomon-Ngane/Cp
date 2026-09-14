@@ -28,5 +28,3 @@ def back_to_main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 Menu Principal", callback_data="menu_main")]
     ])
-
-    ])
