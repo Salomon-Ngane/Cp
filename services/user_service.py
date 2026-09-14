@@ -137,3 +137,13 @@ def buy_item_from_shop(telegram_id: int, item_id: int) -> tuple[bool, str]:
     
     return True, f"✅ Achat réussi ! 1x Item {item_id} ajouté à votre sac."
 
+
+
+
+
+
+
+
+
+
+
