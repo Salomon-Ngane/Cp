@@ -11,6 +11,7 @@ from database.cart import (
     clear_draft,
     toggle_cart_item,
     get_cart,
+    replace_cart,
 )
 from services.session_service import (
     get_matches_by_sport,
@@ -24,7 +25,7 @@ from services.session_service import (
 )
 from services.user_service import get_user_by_id
 from bot.ui import main_menu_keyboard
-from bot.handlers.tickets_view import show_ticket_detail, replay_ticket_to_cart
+from bot.handlers.tickets_view import show_ticket_detail
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,8 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         )
 
     elif data == "menu_duel":
+        # Un nouveau ticket démarre toujours avec un panier propre.
+        clear_draft(user_id)
         context.user_data.pop("creation_state", None)
         text = "⚔️ **Mode de jeu**\n\nChoisissez comment vous souhaitez parier :"
         keyboard = InlineKeyboardMarkup([
@@ -251,17 +254,17 @@ async def handle_creation_callback(update: Update, context: ContextTypes.DEFAULT
         sid = data.split("_", 2)[2]
         await _prompt_join_session(query, user_id, sid)
 
+    elif data.startswith("replay_ticket_"):
+        sid = data.split("_", 2)[2]
+        await _replay_ticket(query, user_id, sid)
+
     elif data.startswith("ticket_"):
         parts = data.split("_", 2)
         if len(parts) != 3:
             await _show_callback_error(query, "Ticket invalide.", "my_tickets")
             return
         sid, tab = parts[1], parts[2]
-
-        if tab == "replay":
-            await replay_ticket_to_cart(query, sid)
-        else:
-            await show_ticket_detail(query, sid, tab)
+        await show_ticket_detail(query, sid, tab)
 
     elif data in ("my_tickets", "menu_tickets"):
         try:
@@ -886,6 +889,91 @@ async def _process_ticket_creation(query, user_id, context):
     )
 
 
+async def _replay_ticket(query, user_id, session_id):
+    """Restaure la sélection d'un ticket en cours dans le panier."""
+    try:
+        session = get_session(session_id)
+        if not session:
+            await _show_callback_error(query, "Ticket introuvable.", "my_tickets")
+            return
+        if session.get("status") != "IN_PROGRESS":
+            await _show_callback_error(
+                query,
+                "Le replay est disponible uniquement pour un ticket en cours.",
+                "my_tickets",
+            )
+            return
+
+        tickets = get_tickets_for_session(session_id)
+        my_ticket = next(
+            (t for t in tickets if str(t.get("user_id")) == str(user_id)),
+            None,
+        )
+        if not my_ticket:
+            await _show_callback_error(query, "Ce ticket ne t'appartient pas.", "my_tickets")
+            return
+
+        predictions = my_ticket.get("predictions") or []
+        if not predictions:
+            await _show_callback_error(query, "Aucune sélection à rejouer.", "my_tickets")
+            return
+
+        match_ids = [str(p.get("match_id")) for p in predictions if p.get("match_id") is not None]
+        matches = get_matches_by_ids(match_ids)
+        available = {
+            str(m.get("api_match_id")): m
+            for m in matches
+            if str(m.get("status", "")).upper() == "NS"
+        }
+        restored = [p for p in predictions if str(p.get("match_id")) in available]
+        missing = [p for p in predictions if str(p.get("match_id")) not in available]
+
+        if not restored:
+            await _show_callback_error(
+                query,
+                "Aucun des matchs de cette sélection n'est encore disponible pour un nouveau ticket.",
+                "my_tickets",
+            )
+            return
+
+        replace_cart(user_id, restored)
+        update_draft_settings(user_id, {
+            "session_type": session.get("type", "DUEL"),
+            "gross_fee": session.get("gross_entry_fee", 100),
+            "match_count": len(restored),
+            "max_participants": int(session.get("max_participants", 2)),
+            "prize_mode": session.get("prize_mode", "WINNER_TAKES_ALL"),
+        })
+
+        warning = ""
+        if missing:
+            warning = (
+                f"\n\n⚠️ {len(missing)} match(s) de l'ancien ticket ne sont plus disponibles "
+                "et n'ont pas été restaurés."
+            )
+
+        await query.edit_message_text(
+            "🔄 **Sélection rejouée !**\n\n"
+            f"{len(restored)} pronostic(s) ont été remis dans ton panier."
+            f"{warning}\n\n"
+            "Tu peux maintenant modifier, ajouter ou retirer des pronostics, "
+            "puis créer un nouveau ticket.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎯 Modifier ma sélection", callback_data="start_join_draft")],
+                [InlineKeyboardButton("➕ Créer un nouveau ticket", callback_data="menu_duel")],
+                [InlineKeyboardButton("⬅️ Retour aux tickets", callback_data="my_tickets")],
+            ]),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        logger.exception("Erreur replay ticket %s pour %s", session_id, user_id)
+        await _show_callback_error(
+            query,
+            "Impossible de rejouer cette sélection pour le moment.",
+            "my_tickets",
+        )
+
+
 async def _show_public_duels(query, user_id, stype):
     """Affiche les salons publics après la période de grâce de 5 minutes."""
     try:
@@ -950,17 +1038,17 @@ async def _show_public_duels(query, user_id, stype):
 
     for session in public_sessions:
         creator = get_user_by_id(session["creator_id"]) or {}
-        username = creator.get("username", "Joueur")
+        player_code = creator.get("user_code") or creator.get("player_code") or "Joueur"
 
         if stype == "DUEL":
             label = (
-                f"🥊 {username} — "
+                f"🥊 Joueur {player_code} — "
                 f"{session['gross_entry_fee']} Coins "
                 f"({session['match_count']}m)"
             )
         else:
             label = (
-                f"🏟️ {username} — "
+                f"🏟️ Joueur {player_code} — "
                 f"{session['gross_entry_fee']} Coins "
                 f"({session['match_count']}m) "
                 f"[Max {session.get('max_participants', 4)}j]"
@@ -1121,71 +1209,41 @@ async def propose_join_duel(message, user_id, session_id, context):
     )
 
 
-def _tickets_keyboard(sessions, user_id=None):
-    user_id = user_id if user_id is not None else 0
-    active = [
-        s for s in sessions
-        if s.get("status") in ("WAITING", "IN_PROGRESS")
-    ]
-    history = [
-        s for s in sessions
-        if s.get("status") in ("COMPLETED", "CANCELLED")
-    ][:4]
-
-    def status_label(session):
-        status = session.get("status")
-        if status == "WAITING":
-            return "⏳ En attente"
-        if status == "IN_PROGRESS":
-            return "🔴 En cours"
-        if status == "CANCELLED":
-            return "🟡 Remboursé"
-        if status == "COMPLETED":
-            if session.get("type") == "DUEL" and session.get("winner_id") is None:
-                return "🟡 Remboursé"
-            if str(session.get("winner_id")) == str(user_id):
-                return "🟢 Gagné"
-            return "🔴 Perdu"
-        return "⚪ " + str(status or "Inconnu")
-
+def _tickets_keyboard(sessions, user_id):
     keyboard = []
+    for session in sessions:
+        status = session.get("status")
+        winner_id = session.get("winner_id")
+        if status == "WAITING":
+            icon, label = "⏳", "En attente"
+        elif status == "IN_PROGRESS":
+            icon, label = "🔴", "En cours"
+        elif status == "CANCELLED":
+            icon, label = "🟡", "Remboursé"
+        elif status == "COMPLETED" and winner_id is not None and str(winner_id) == str(user_id):
+            icon, label = "🟢", "Gagné"
+        elif status == "COMPLETED" and winner_id is None and session.get("type") == "DUEL":
+            icon, label = "🟡", "Remboursé"
+        elif status == "COMPLETED":
+            icon, label = "🔴", "Perdu"
+        else:
+            icon, label = "⚪", str(status or "Inconnu")
 
-    if active:
+        stype = "Duel" if session.get("type") == "DUEL" else "Arena"
+        fee = session.get("gross_entry_fee", 0)
         keyboard.append([
-            InlineKeyboardButton("🔴 TICKETS EN COURS", callback_data="ignore")
+            InlineKeyboardButton(
+                f"{icon} {label} — {stype} — {fee} Coins",
+                callback_data=f"ticket_{session['id']}_mine",
+            )
         ])
-        for session in active:
-            stype = "Duel" if session.get("type") == "DUEL" else "Arena"
-            fee = session.get("gross_entry_fee", 0)
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{status_label(session)} — {stype} — {fee} Coins",
-                    callback_data=f"ticket_{session['id']}_mine",
-                )
-            ])
-
-    if history:
-        keyboard.append([
-            InlineKeyboardButton("📜 HISTORIQUE — 4 DERNIERS", callback_data="ignore")
-        ])
-        for session in history:
-            stype = "Duel" if session.get("type") == "DUEL" else "Arena"
-            fee = session.get("gross_entry_fee", 0)
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{status_label(session)} — {stype} — {fee} Coins",
-                    callback_data=f"ticket_{session['id']}_mine",
-                )
-            ])
 
     keyboard.append([
         InlineKeyboardButton("➕ Créer un nouveau ticket", callback_data="menu_duel")
     ])
-    keyboard.append([
-        InlineKeyboardButton("⬅️ Retour", callback_data="menu_main")
-    ])
-
+    keyboard.append([InlineKeyboardButton("⬅️ Retour", callback_data="menu_main")])
     return InlineKeyboardMarkup(keyboard)
+
 
 
 
