@@ -28,7 +28,7 @@ telegram_app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
 # Enregistrement des commandes
 telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("top", user_top))
+telegram_app.add_handler(CommandHandler("top", top_command))
 telegram_app.add_handler(CommandHandler("tickets", user_tickets))
 telegram_app.add_handler(CommandHandler("live", user_live))
 
@@ -47,20 +47,36 @@ telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_
 
 async def global_callback_router(update: Update, context):
     query = update.callback_query
-    data = query.data
-    
+
+    if not query:
+        return
+
+    data = query.data or ""
+
+    await query.answer()
+
     if data == "menu_account":
         await handle_account_menu(query, query.from_user.id)
+
     elif data == "menu_network":
         await user_referral_menu(update, context)
+
     elif data == "menu_shop":
         await shop_menu(update, context)
+
     elif data == "menu_top":
         await show_category_menu(update)
+
     elif data.startswith("buy_item_"):
         await handle_shop_buy(update, context)
-    elif data.startswith("topcat_") or data.startswith("topshow_") or data == "top_back":
+
+    elif (
+        data.startswith("topcat_")
+        or data.startswith("topshow_")
+        or data == "top_back"
+    ):
         await handle_top_callbacks(update, context)
+
     else:
         await handle_creation_callback(update, context)
 
