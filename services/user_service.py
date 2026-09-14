@@ -3,8 +3,9 @@ import string
 from database.connection import supabase
 
 def generate_code(prefix="U"):
-    """Génère un code unique de 7 caractères (ex: U8A3F9K)"""
-    chars = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    """Génère un code public unique de 5 caractères (ex: U8A3F9)."""
+    prefix = str(prefix or "U")[:1].upper()
+    chars = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
     return f"{prefix}{chars}"
 
 def get_or_create_user(telegram_id: int, username: str, referrer_id: int = None):
