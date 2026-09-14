@@ -85,7 +85,7 @@ async def user_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     await update.message.reply_text(
-        "🔴 **Mes matchs en direct**
+        "🔴 **Mes matchs en direct**"
 Sélectionne un ticket pour suivre son évolution.",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
