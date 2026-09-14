@@ -1,8 +1,7 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from services.session_service import get_dynamic_leaderboard
-
+from services.session_service import calculate_leaderboards
 
 logger = logging.getLogger(__name__)
 # (Le reste du code de top.py ne change pas)
@@ -68,42 +67,43 @@ async def handle_top_callbacks(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if data.startswith("topcat_"):
-    category = data.split("_")[1]
-    await show_period_menu(update, category)
-    return
+        category = data.split("_")[1]
+        await show_period_menu(update, category)
+        return
 
-if data.startswith("topshow_"):
-    parts = data.split("_")
-    category = parts[1]
-    period = parts[2]
-
-    board = get_dynamic_leaderboard(category, period, limit=10)
-    ...
+    if data.startswith("topshow_"):
+        parts = data.split("_")
+        category = parts[1]
+        period = parts[2]
         
-        # Récupération dynamique des données (Appel de ta fonction existante)
-        board = get_dynamic_leaderboard(category, period, limit=10)
+        # Récupération dynamique des données
+        board, min_volume = calculate_leaderboards(category, period)
         
         cat_name = CAT_NAMES.get(category, "Classement")
         per_name = PERIOD_NAMES.get(period, "Période")
         
-        text = f"🏆 **TOP 10 — {cat_name} ({per_name})**\n\n"
+        text = f"🏆 **TOP 10 — {cat_name} ({per_name})**\n"
+        text += f"⚠️ *Volume de jeu minimum requis : {min_volume} Coins*\n\n"
         
         if not board:
             text += "📭 Aucun joueur classé pour cette période."
         else:
             medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
             
-            for idx, p in enumerate(board):
+            for idx, p in enumerate(board[:10]):
                 medal = medals[idx] if idx < 10 else f"#{idx+1}"
-                text += f"{medal} **{p['username']}**\n"
+                qualif = "✅ Qualifié" if p["qualified"] else "❌ Volume Insuffisant"
+                
+                text += f"{medal} **{p['username']}** (`{p['user_code']}`)\n"
                 
                 if category == "winrate":
-                    text += f"   👉 `{p['score']:.1f}%` de réussite\n"
+                    text += f"   👉 `{p['winrate']}%` de réussite | Vol: {p['volume']}\n"
                 elif category == "network":
-                    text += f"   👉 `{p['score']}` filleul(s)\n"
+                    text += f"   👉 `{p['network']}` filleuls | Vol: {p['volume']}\n"
                 elif category == "volume":
-                    text += f"   👉 `{p['score']}` Coins misés\n"
-                text += "\n"
+                    text += f"   👉 `{p['volume']}` Coins misés\n"
+                    
+                text += f"   Statut : {qualif}\n\n"
         
         keyboard = [
             [InlineKeyboardButton("🔙 Retour aux périodes", callback_data=f"topcat_{category}")],
